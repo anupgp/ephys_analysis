@@ -1,4 +1,4 @@
-# * Python code for analysis of electrophysiology data
+#  Python code for analysis of electrophysiology data
 
 ## Requirements (modules):
    1. neo
