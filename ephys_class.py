@@ -25,6 +25,8 @@ class EphysClass:
             self.nsweeps = self.nsweeps[0]
         self.nchannels = self.reader.signal_channels_count()
         self.sres = np.zeros((int(self.nsweeps)))
+        self.nstim = 0
+        self.stimprop = [dict({"nstim":0,"isi":0,"istims":[],"tstims":[]}) for sweep in np.arange(0,self.nsweeps)]
         # extract channel/signal properties for each signal/channel from header
         channelspecs = self.reader.header["signal_channels"].dtype.names
         self.channelspecs = [dict.fromkeys(channelspecs) for channel in np.arange(0,self.nchannels)]
@@ -135,7 +137,8 @@ class EphysClass:
             # find the difference between before and after the current jump
             deltajumpN = abs(y[ipeakN+1]-y[ipeakN])
             deltajumpP = abs(y[ipeakP+1]-y[ipeakP])
-            self.sres[isweep] = (np.mean([deltajumpN,deltajumpP])*1e-3)/istep
+            # self.sres[isweep] = (np.mean([deltajumpN,deltajumpP])*1e-3)/istep # average +ve and -ve voltage jumps
+            self.sres[isweep] = (deltajumpP*1e-3)/istep # take only -ve jump
             print('Series resistance: ',self.sres[isweep]/1e6,'Mohms')
             ah.plot(t,y)
             ah.plot([t[ipeakP],t[ipeakP+1]],[y[ipeakP],y[ipeakP+1]],color='k')
@@ -143,17 +146,117 @@ class EphysClass:
             print(isweep,t.shape,y.shape)
         plt.show()
 
-    def find_epsp_peak(self,sigchannel,trgchannel):
+    def extract_response(self,reschannel,trgchannel,tres,min_isi):
+        # extract signal from each sweep
+        # check if isi is <= min_isi
+        if (self.stimprop[0]["nstim"] > 1):
+            isi = [elm["isi"] for elm in  self.stimprop if not np.isnan(elm["isi"])]
+            if (len(isi)>0):
+                isi = np.mean(isi)
+                if (isi < min_isi):
+                    return()
+                # ---------
+        # ----------
+        # declare array to hold all the responses
+        y = np.zeros((int(tres/self.si),self.nsweeps))
+        # get channel ids for response and trigger channels
+        ires = [channelspec['id'] for channelspec in self.channelspecs if re.search(reschannel,channelspec['name'])]
+        itrg = [channelspec['id'] for channelspec in self.channelspecs if re.search(trgchannel,channelspec['name'])]
+        nres = int(tres/self.si)        
+        for isweep in np.arange(0,self.nsweeps):
+            tstims = self.stimprop[isweep]["tstims"]
+            istims = self.stimprop[isweep]["istims"]
+            ipre = istims[0]
+            ipost = istims[-1]+nres
+            print(ipre,ipost)
+            y[:,isweep] = self.data[isweep,ires,ipre:ipre+nres] # [isweep,ichannel,isample]
+            # ---------------
+        return(y)
+        # -------------
         
-        pass
+    def get_signal_props(self,reschannel,trgchannel):
+        # Find the peaks and other parameters of the respose (EPSP/EPSC)
+        # fh = plt.figure()
+        # ah1 = plt.subplot(211)
+        # ah2 = plt.subplot(212,sharex=ah1)
+        ires = [channelspec['id'] for channelspec in self.channelspecs if re.search(reschannel,channelspec['name'])]
+        itrg = [channelspec['id'] for channelspec in self.channelspecs if re.search(trgchannel,channelspec['name'])]
+        t = np.arange(self.tstart,self.tstop,self.si)
+        # find the trigger pulses
+        triggerthres = 500
+        tprestim = 0.02
+        nprestim = int(tprestim/self.si)
+        tpoststim = 0.2
+        npoststim = int(tpoststim/self.si)
+        for isweep in np.arange(0,self.nsweeps):
+            tstims = self.stimprop[isweep]["tstims"]
+            istims = self.stimprop[isweep]["istims"]
+            ipre = istims[0]-nprestim
+            ipost = istims[-1]+npoststim
+            yt = self.data[isweep,itrg,ipre:ipost] # [isweep,ichannel,isample]
+            yr = self.data[isweep,ires,ipre:ipost] # [isweep,ichannel,isample]
+            tt = t[ipre:ipost]-t[ipre]
+            yr.resize(max(yr.shape))
+            yt.resize(max(yt.shape))
+            print("shapes",tt.shape,yr.shape,yt.shape)
+            # polynomial fit on smooth data
+            # model = np.polyfit(tt,smooth(yr,windowlen=int(0.1/self.si),window='hanning'),1)
+            # predicted = np.polyval(model,tt)
+            # yrf = smooth(yr,windowlen=int(0.01/self.si),window='hanning')
+            # yrfbase = np.mean(yrf[0:nprestim])
+            # for j in np.arange(0,len(istims)):
+            #     iyrfpeak = np.argmax(yrf[)
+            # ah1.plot(tt,yr)
+            # ah1.plot(tt,yrf,'k')
+            # ah1.plot(tt[iyrfpeak],yrf[iyrfpeak],'o')
+            # ah2.plot(tt,yt)
+            # --------------
+        # plt.show()
+
+    def get_stimprops(self,trgchannel):
+        # get information about stimulation from the trigger channel
+        # properties:
+        # nstim: number of stimulations
+        # istim: index of stimulations
+        # tstims: time of each stimulation
+        # isi: mean inter stimulus inverval
+        itrg = [channelspec['id'] for channelspec in self.channelspecs if re.search(trgchannel,channelspec['name'])]
+        t = np.arange(self.tstart,self.tstop,self.si)
+        # find the trigger pulses
+        triggerthres = 500
+        for isweep in np.arange(0,self.nsweeps):
+            yt = self.data[isweep,itrg,:] # [isweep,ichannel,isample]
+            yt.resize(self.samplesize)
+            istims,_ = find_peaks(yt,height=triggerthres)
+            self.nstim = len(istims)
+            self.stimprop[isweep]["nstim"] = self.nstim
+            [self.stimprop[isweep]["istims"].append(istim) for istim in istims]
+            [self.stimprop[isweep]["tstims"].append(t[istim]) for istim in istims]
+            self.stimprop[isweep]["isi"] = np.mean(np.diff(self.stimprop[isweep]["tstims"]))
+            print('isweep:',isweep,'nstim',self.nstim)
+            print('isi',self.stimprop[isweep]["isi"])
+            print('tstims',self.stimprop[isweep]["tstims"])
+            # ------------------
+        # plot stimulation channel
+        # fh = plt.figure()
+        # ah1 = plt.subplot(111)
+        # ah1.plot(t,yt)
+        for isweep in np.arange(0,self.nsweeps):
+            nstim = self.stimprop[isweep]["nstim"]
+            istims = self.stimprop[isweep]["istims"]
+            tstims = self.stimprop[isweep]["tstims"]
+            # ah1.plot(tstims,yt[istims],'o','k')
+            # --------------------------------
+        # plt.show()
         
     def find_opposing_peak_pair(t1,x1,t2,x2,isi):
         # Find the best positive_negative peak pair that has similar peak and is separated by isi
         # find positive and negative peaks with similar amplitudes
         # !!!!!! NOT IMPLEMENTED !!!!!
-        ix1 = np.argsort(x1)
-        ix2 = np.searchsorted(x1[ix1],x2,side='left')
-        imin = np.argmin(np.arange(0,len(ix2)) - ix2)
+        # ix1 = np.argsort(x1)
+        # ix2 = np.searchsorted(x1[ix1],x2,side='left')
+        # imin = np.argmin(np.arange(0,len(ix2)) - ix2)
+        pass
                          
 
     def series_res_vclamp(self,signal_name):
@@ -164,3 +267,14 @@ class EphysClass:
         print("Object has been deleted")
         pass
 
+    
+# -----------------------
+def smooth(y,windowlen=3,window = 'hanning'):
+    s = np.concatenate([y[windowlen-1:0:-1],y,y[-2:-windowlen-1:-1]])
+    if (window == 'flat'):
+        w = np.ones(windowlen,dtype='double')
+    else:
+        w = eval('np.'+window+'(windowlen)')
+        # -----------
+    yy = np.convolve(w/w.sum(),s,mode='same')[windowlen-1:-windowlen+1]
+    return (yy)
