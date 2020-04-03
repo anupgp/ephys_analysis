@@ -3,6 +3,8 @@ import pandas as pd
 import re
 import os
 import numpy as np
+from itertools import chain
+import datetime
 
 # read masterfile in Microsoft_excel
 masterfile_path = '/Users/macbookair/goofy/data/beiquelab/glu_uncage_ca1/'
@@ -17,21 +19,24 @@ clampchannel = "IN1"
 trgchannel = "IN7"
 istep = 30e-12
 fcount=0
-
+# open pandas dataframe to populate data
+roidf = pd.DataFrame()
+fileid=0
 # open template file
 template = pd.read_csv(templatefilepath,header=None)
 template.columns = ["t","y"]
 for row in range(0,masterdf.shape[0]):
-# for row in range(17,18):
-# for row in range(3,4):
+# for row in range(8,9):
     abffile = str(masterdf.loc[row,"ephys_file"])
+    ophysfile = str(masterdf.loc[row,"ophys_file"])
     if(re.search(r'^.*nan.*$',abffile) is not None):
         print('!!!! Warning: empty cell !!!!')
         print('Skipping to the next row')
         continue
-    power = round(masterdf.loc[row,"power"])
+    uncagepower = round(masterdf.loc[row,"power"])
     clamp = str(masterdf.loc[row,"clamp"])
-    gender = str(masterdf.loc[row,"gender"])
+    sex = str(masterdf.loc[row,"sex"])
+    dob = str(masterdf.loc[row,"dob"])
     spinecount = int(round(masterdf.loc[row,"spine"]))
     badsweeps = str(masterdf.loc[row,"badsweeps"]).split(",")
     try:
@@ -46,6 +51,7 @@ for row in range(0,masterdf.shape[0]):
         print('Skipping to the next file')
         continue
     # extract date
+    # expdate = datetime.datetime.strptime(re.search('[0-9]{8,8}?',abffile)[0],"%Y%m%d")
     expdate = re.search('[0-9]{8,8}?',abffile)[0]
     # extract spineid
     spineid = re.sub("\/","_",re.search('\/[0-9]{8,8}?\/.*?\/',abffile)[0][1:-1])+"S"+str(spinecount)
@@ -56,22 +62,39 @@ for row in range(0,masterdf.shape[0]):
     print('Expdate:\t',expdate)
     print('Spineid:\t',spineid)
     print('Clamp:\t',clamp)
-    if (not re.search(".*CC.*",clamp)):
-        continue
     # create ephys object
     ephys1 = EphysClass(abffile,loaddata=True,badsweeps=badsweeps)
     ephys1.info()
     ephys1.get_stimprops(trgchannel)
     ephys1.get_signal_props(reschannel,trgchannel)
-    # ephys1.average_trace(reschannel,trgchannel,0.01)
-    # ephys1.template_match(reschannel,trgchannel,template["t"],template["y"])
-    [tpeaks,tlags,ypeaks] = ephys1.find_peaks(reschannel,trgchannel)
-    print(tpeaks,tlags,ypeaks)
-    # ephys1.show([0,1,2,3],[1])           # [channels],[sweeps]
-    # ephys1.get_stimprops(trgchannel)
-    # ephys1.get_signal_props(reschannel,trgchannel)
-    # sweeps = np.setdiff1d(np.arange(0,ephys1.nsweeps),badsweeps)
-    # ephys1.info()
-    # ephys1.seriesres_currentclamp(reschannel,clampchannel)
-    # print('Series resistance = ','\t',ephys1.sres)
+    # skip if no good sweeps found
+    if (len(ephys1.sweeps) == 0):
+        print('No good sweeps in the file!')
+        continue
+    if (re.search(".*CC.*",clamp)):
+        ephys1.seriesres_currentclamp(reschannel,clampchannel)
+        [tlags,ypeaks,fh,ah] = ephys1.find_peaks(reschannel,trgchannel,plotdata=False,peakdir="+")
 
+    if (re.search(".*VC.*",clamp)):
+        [tlags,ypeaks,fh,ah] = ephys1.find_peaks(reschannel,trgchannel,plotdata=False,peakdir="-")
+
+    isi = ephys1.isi
+    sres = ephys1.sres
+    sres = sres.mean()
+
+    nsweeps = len(ephys1.sweeps)
+    print(tlags,ypeaks)
+    # ephys1.show([0,1,2,3],[1])           # [channels],[sweeps]
+    # create the record
+    for istim in np.arange(0,len(ypeaks)):
+        record = {"ephysfile":abffile,"ophysfile":ophysfile,"doe":expdate,"spineid":spineid,"fileid":fileid}
+        record.update({"dob":dob,"sex":sex,"clamp":clamp,"uncagepower":uncagepower})
+        record.update({"nsweeps":nsweeps,"isi":isi,"istim":istim})
+        record.update({"tlag":tlags[istim],"peak":ypeaks[istim],"sres":sres})
+        print(record)
+        roidf = roidf.append(record,ignore_index = True) # append a record per stim
+    fileid = fileid+1
+# -----------------
+# save the dataframe
+dfname = "ephys_analysis_uncage_pairedpulse_cclampV2.csv"
+roidf.to_csv(masterfile_path+dfname,index=False)
