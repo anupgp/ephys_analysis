@@ -5,6 +5,7 @@ import os
 import numpy as np
 from itertools import chain
 import datetime
+from matplotlib import pyplot as plt
 
 # read masterfile in Microsoft_excel
 masterfile_path = '/Users/macbookair/goofy/data/beiquelab/glu_uncage_ca1/'
@@ -55,7 +56,6 @@ for row in range(0,masterdf.shape[0]):
     expdate = re.search('[0-9]{8,8}?',abffile)[0]
     # extract spineid
     spineid = re.sub("\/","_",re.search('\/[0-9]{8,8}?\/.*?\/',abffile)[0][1:-1])+"S"+str(spinecount)
-    # filename
     # abffname = re.search('[^/]+.\.*$',abffile)[0] # filename without extension
     # abffname = re.sub(' ','_',abffname)
     print('ABF filename:\t',abffile)
@@ -67,6 +67,8 @@ for row in range(0,masterdf.shape[0]):
     ephys1.info()
     ephys1.get_stimprops(trgchannel)
     ephys1.get_signal_props(reschannel,trgchannel)
+    fh = None
+    fht = None
     # skip if no good sweeps found
     if (len(ephys1.sweeps) == 0):
         print('No good sweeps in the file!')
@@ -74,10 +76,23 @@ for row in range(0,masterdf.shape[0]):
     if (re.search(".*CC.*",clamp)):
         ephys1.seriesres_currentclamp(reschannel,clampchannel)
         [tlags,ypeaks,fh,ah] = ephys1.find_peaks(reschannel,trgchannel,plotdata=False,peakdir="+")
-
+        [tlagst,ypeakst,fht,aht] = ephys1.template_match_avg(reschannel,clampchannel,peakdir="+")
     if (re.search(".*VC.*",clamp)):
         [tlags,ypeaks,fh,ah] = ephys1.find_peaks(reschannel,trgchannel,plotdata=False,peakdir="-")
-
+        tlagst = np.zeros(tlags.shape)
+        ypeakst = np.zeros(ypeaks.shape)
+    # create folder for each spineid
+    if(not os.path.exists(masterfile_path+spineid+'/')):
+        os.mkdir(masterfile_path+spineid+'/')
+    if(fh is not None):
+    # save figure find_peaks
+        figname = spineid+'_'+clamp+'_'+ephys1.fid+'_find_peaks'+'.png'
+        fh.savefig(masterfile_path+spineid+'/'+figname,dpi=300)
+    if(fht is not None):
+    # save figure template_match
+        figname = spineid+'_'+clamp+'_'+ephys1.fid+'_template_match'+'.png'
+        fht.savefig(masterfile_path+spineid+'/'+figname,dpi=300)
+    # --------------
     isi = ephys1.isi
     sres = ephys1.sres
     sres = sres.mean()
@@ -91,10 +106,12 @@ for row in range(0,masterdf.shape[0]):
         record.update({"dob":dob,"sex":sex,"clamp":clamp,"uncagepower":uncagepower})
         record.update({"nsweeps":nsweeps,"isi":isi,"istim":istim})
         record.update({"tlag":tlags[istim],"peak":ypeaks[istim],"sres":sres})
+        record.update({"tlagt":tlagst[istim],"peakt":ypeakst[istim]})
         print(record)
         roidf = roidf.append(record,ignore_index = True) # append a record per stim
     fileid = fileid+1
+    # plt.show()
 # -----------------
 # save the dataframe
-dfname = "ephys_analysis_uncage_pairedpulse_cclampV2.csv"
+dfname = "ephys_analysis_uncage_pairedpulse_cclampV3.csv"
 roidf.to_csv(masterfile_path+dfname,index=False)

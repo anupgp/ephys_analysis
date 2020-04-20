@@ -36,9 +36,12 @@ def format_plot(fh,ah,xlab="",ylab="",title=""):
 ## Calculate facilitation (ppratio) for each spineid+clamp+isi
 def compute_ppr(x):
     nstims = len(x)
-    lastpeak = x[x["istim"] == 1]["peak"].to_numpy()
     firstpeak = x[x["istim"] == 0]["peak"].to_numpy()
-    ppr = np.repeat((lastpeak/firstpeak),(nstims))
+    if (nstims>1):
+        lastpeak = x[x["istim"] == nstims-1]["peak"].to_numpy()
+        ppr = np.repeat((lastpeak/firstpeak),(nstims))
+    else:
+        ppr = 0
     dftemp = pd.DataFrame({"ppr" : ppr},index = x.index)
     return(dftemp)
 
@@ -83,24 +86,23 @@ pd.set_option('display.notebook_repr_html', False)
 
 # open the csv file containing the main dataframe
 datapath = '/Users/macbookair/goofy/data/beiquelab/glu_uncage_ca1/' 
-fname = 'ephys_analysis_uncage_pairedpulse_cclampV1.csv'
+fname = 'ephys_analysis_uncage_pairedpulse_cclampV2.csv'
 with open(datapath+fname,'r') as csvfile:
     df = pd.read_csv(csvfile)
 
 df["isi"] = df["isi"] *1000
 df["isi" ] = df["isi"].astype('int64')
 df["istim" ] = df["istim"].astype('int64')
-df["irun"] = df.groupby(["spineid","isi","istim"]).apply(lambda x:pd.DataFrame({"len":np.arange(1,len(x)+1)},index=x.index))
-df[["ppr"]] = df.groupby(["fileid"]).apply(compute_ppr)
+df["irun"] = df.groupby(["clamp","spineid","isi","istim"]).apply(lambda x:pd.DataFrame({"len":np.arange(1,len(x)+1)},index=x.index))
+df[["ppr"]] = df.groupby(["clamp","fileid"]).apply(compute_ppr)
 
 # save the DataFrame
 df.sort_values(["spineid","istim","isi"],inplace=True)
-df.to_csv(datapath+"ephys_analysis_uncage_pairedpulse_cclampV1out.csv",index=False)
+df.to_csv(datapath+"ephys_analysis_uncage_pairedpulse_cclampV2out.csv",index=False)
+
 # -----------------------
-
-dfstats = df[(df["istim"]==1) & (df["irun"] == 1)].groupby(["isi"])["ppr","peak"].apply(compute_stats)
-print(dfstats.head)
-
+# plots: PPR, EPSCP versus ISI
+dfstats = df[(df["istim"]==1) & (df["irun"] == 1) & (df["clamp"] == "CC")].groupby(["isi"])["ppr","peak"].apply(compute_stats)
 # create a new MultiIndex for prpt
 dfmidx = df.set_index(["spineid","isi"],drop=True)
 statmean = "nanmean"
@@ -133,5 +135,8 @@ ah.legend().set_visible(False)
 plt.tight_layout()
 fh.savefig(datapath+"glu_uncage_ppr_isi.png")
 # fh.savefig(datapath+"glu_uncage_2nd_epsp_isi.png")
-plt.show()
+# plt.show()
+
+# -------------------------
+# plot bar EPSC amplitude
 
