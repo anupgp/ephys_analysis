@@ -7,6 +7,7 @@ from scipy.signal import find_peaks
 import re
 from scipy import interpolate
 from scipy.signal import butter, lfilter, freqz, detrend
+import os
 
 def format_plot(fh,ah,xlab="",ylab="",title=""):
     font_path = '/Users/macbookair/.matplotlib/Fonts/Arial.ttf'
@@ -45,6 +46,10 @@ class EphysClass:
         self.fid = re.search('[0-9]{1,10}.abf',fname)[0][0:-4]
         self.loaddata = loaddata
         self.badsweeps = badsweeps
+        if(not os.path.exists(self.fname)):
+            print("The file does not exist! check the path!")
+            return()
+        
         self.reader = AxonIO(filename=self.fname)
         self.nblocks = self.reader.block_count()
         self.nsweeps = np.zeros(self.nblocks,dtype=np.int)
@@ -184,7 +189,8 @@ class EphysClass:
         searchwin = int(0.1/self.si) # 0.07
         # ------------
         sweeps = self.sweeps
-        ioffset = 15000
+        ioffset = int(self.vclampsteps[0]["ipost"][-1])
+        print(ioffset)
         fh = plt.figure()
         ah = fh.add_subplot(111)
         fh,ah = format_plot(fh,ah,xlab = "Time(ms)",ylab="("+self.channelspecs[0]["units"]+")",title=self.fid)
@@ -437,7 +443,7 @@ class EphysClass:
         # ---------------
         tmaxshift = 0.03
         imaxshift = int(tmaxshift/self.si)
-        ioffset = 15000
+        ioffset = int(self.vclampsteps[0]["ipost"][-1])
         sweeps = self.sweeps
         y = self.data[sweeps,iresch,ioffset:].T # load the full trace
         t = np.arange(0,(y.shape[0]+2)*self.si,self.si)
@@ -509,6 +515,8 @@ class EphysClass:
         # ah1.plot(t,s,'red')    
         # ah.plot(st,sy,'g')
         return(tlags,ypeaks,fh,ah)
+
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
         
     def show(self,ichannels=[],isweeps=[]):
         # display traces
@@ -516,15 +524,15 @@ class EphysClass:
             isweeps = np.arange(0,self.nsweeps)
         if (len(ichannels) == 0):
             ichannels = np.arange(0,self.nchannels)
-            fig = plt.figure()
-            pannelcount=0
             # load data if not already loaded
         if(not self.loaddata):
             self.data = self.__loaddata()
-
+        
         t = np.arange(self.tstart,self.tstop,self.si)
+        fig = plt.figure()
         ax = []
         ax.append(fig.add_subplot(len(ichannels),1,1))
+        pannelcount=0
         for i in ichannels:
             pannelcount = pannelcount + 1
             if(pannelcount>1):
@@ -536,8 +544,9 @@ class EphysClass:
             ax[pannelcount-1].set_ylabel(channelylabel)
             for j in isweeps:
                 ax[pannelcount-1].plot(t,self.data[j,i,:])
-                plt.show()
-                # ===============================================
+        plt.show()
+
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 
     def __loaddata(self):
         """loads all the sweeps and channels into a numpy ndarray: timeseries * sweeps * channels """
@@ -555,7 +564,8 @@ class EphysClass:
                 # print('Data reading completed')
                 # print('Data shape: ',self.data.shape)
         return(self.data)
-    # ===============================================
+
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> 
             
     def info(self):
         channelnames = [channelspec['name'] for channelspec in self.channelspecs]
@@ -576,7 +586,61 @@ class EphysClass:
         print('Time:','\t',self.time)
         print("==================================================================")
 
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+        
+    def extract_indices_holdingsteps(self,clampch,NstepsPos=1,NstepsNeg=1):
+        iclamp = [channelspec['id'] for channelspec in self.channelspecs if re.search(clampch,channelspec['name'])]
+        t = np.arange(self.tstart,self.tstop,self.si)
+        self.iholdsteps = [dict({"neg":np.zeros(NstepsNeg,dtype=np.uint),"pos":np.zeros(NstepsPos,dtype=np.uint)}) for sweep in np.arange(0,self.nsweeps)]
+        
+        for isweep in np.arange(0,self.nsweeps):
+            clamp = self.data[isweep,iclamp,:].T # [isweep,ichannel,isample]
+            dclamp = np.diff(clamp,axis=0)
+            dclamp.resize(max(dclamp.shape))
+            # find all negative peaks above threshold
+            ineg_peaks = find_peaks(-dclamp,height=1,threshold=1)[0][0:NstepsNeg]
+            # find all positive peaks above threshold
+            ipos_peaks = find_peaks(dclamp,height=1,threshold=1)[0][0:NstepsPos]
+            self.iholdsteps[isweep]["neg"] = ineg_peaks
+            self.iholdsteps[isweep]["pos"] = ipos_peaks
+            # plotting
+            # fh = plt.figure()
+            # ah = fh.add_subplot(111)
+            # ah.plot(t[0:len(dclamp)],dclamp)
+            # inegpeaks = self.iholdsteps[isweep]["neg"]
+            # ipospeaks = self.iholdsteps[isweep]["pos"]
+            # print(inegpeaks,ipospeaks)
+            # ah.plot(t[inegpeaks],dclamp[inegpeaks],marker='o',color='r',markersize=10)
+            # ah.plot(t[ipospeaks],dclamp[ipospeaks],marker='o',color='g',markersize=10)
+            # plt.show()
+
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+
+    def extract_indices_stims(self,stimch,Nstims=1):
+        istimch = [channelspec['id'] for channelspec in self.channelspecs if re.search(stimch,channelspec['name'])]
+        t = np.arange(self.tstart,self.tstop,self.si)
+        self.istims = [dict({"istim":np.zeros(Nstims,dtype=np.uint)}) for sweep in np.arange(0,self.nsweeps)]
+        
+        for isweep in np.arange(0,self.nsweeps):
+            stim = self.data[isweep,istimch,:].T # [isweep,ichannel,isample]
+            dstim = np.diff(stim,axis=0)
+            dstim.resize(max(dstim.shape))
+            # find all stim positions (positive peaks) above threshold
+            istims = find_peaks(dstim,height=1,threshold=1)[0][0:Nstims]
+            self.istims[isweep]["istim"] = istims
+            # plotting
+            # fh = plt.figure()
+            # ah = fh.add_subplot(111)
+            # ah.plot(t[0:len(dstim)],dstim)
+            # istims = self.istims[isweep]["istim"]
+            # print(istims)
+            # ah.plot(t[istims],dstim[istims],marker='o',color='g',markersize=10)
+            # plt.show()
+
+#  >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> 
+            
     def seriesres_voltageclamp(self,resch,clampch):
+        
         # Measure series resistance in a voltage-clamp sweep"
         ires = [channelspec['id'] for channelspec in self.channelspecs if re.search(resch,channelspec['name'])]
         iclamp = [channelspec['id'] for channelspec in self.channelspecs if re.search(clampch,channelspec['name'])]
@@ -620,6 +684,7 @@ class EphysClass:
             #     ah.plot([t[ineg_peak],t[ineg_peak+8]],[v[ineg_peak],v[ineg_peak+8]],color='k')
             # plt.show()
 
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
     def seriesres_currentclamp(self,resCh,clampCh):
         # Measure series resistance in a current-clamp sweep"
         ires = [channelspec['id'] for channelspec in self.channelspecs if re.search(resCh,channelspec['name'])]
@@ -664,11 +729,14 @@ class EphysClass:
             #     ah.plot([t[ineg_peak],t[ineg_peak+8]],[v[ineg_peak],v[ineg_peak+8]],color='k')
             # plt.show()
 
-    def extract_response(self,reschannel,trgchannel,tres,min_isi=0):
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+
+    def extract_response(self,reschannel,trgchannel,tpre,tpost,min_isi=0):
         # extract signal from each sweep
         # reschannel: response channel
         # trgchannel: stimulus trigger channel
-        # tres:  duration of the response to return
+        # tpre:  time of the start of the response wrt to stimulus time
+        # tpost:  time of the stop of the response wrt to stimulus time
         # min_isi: minimum inter-stimulus interval between responses
         # check if isi is <= min_isi
         if (self.stimprop[0]["nstim"] > 1):
@@ -676,27 +744,35 @@ class EphysClass:
             if (len(isi)>0):
                 isi = np.mean(isi)
                 if (isi < min_isi):
+                    print("isi < min_isi")
                     return()
                 # ---------
-                # ----------
-                # declare array to hold all the responses
-        y = np.zeros((int(tres/self.si),self.nsweeps))
+        # declare array to hold all the responses
+        nres = int((tpost-tpre)/self.si)        
+        y = np.zeros((nres,self.nsweeps))
+        t = np.arange(0,(tpost-tpre),self.si)
+        tt = np.arange(0,(self.tstop-self.tstart),self.si)[np.newaxis].T
         # get channel ids for response and trigger channels
         ires = [channelspec['id'] for channelspec in self.channelspecs if re.search(reschannel,channelspec['name'])]
         itrg = [channelspec['id'] for channelspec in self.channelspecs if re.search(trgchannel,channelspec['name'])]
-        nres = int(tres/self.si)        
         for isweep in np.arange(0,self.nsweeps):
             tstims = self.stimprop[isweep]["tstims"]
             istims = self.stimprop[isweep]["istims"]
-            ipre = istims[0]
-            ipost = istims[-1]+nres
-            print(ipre,ipost)
-            y[:,isweep] = self.data[isweep,ires,ipre:ipre+nres] # [isweep,ichannel,isample]
-            # ---------------
-        return(y)
+            ilast = self.iholdsteps[isweep]["neg"][-1]
+            ipre = np.where(tt>=(tstims[0]+tpre))[0][0]
+            ipost = np.where(tt>=(tstims[0]+tpost))[0][0]
+            yy = self.data[isweep,ires,ilast:].T # [isweep,ichannel,isample]
+            print(tt[ilast:,:].shape,yy.shape)
+            m1,c1 = np.linalg.lstsq(np.concatenate((tt[ilast:,],np.ones(tt[ilast:,].shape)),axis=1),yy,rcond=None)[0]
+            baseline = (tt[ilast,:]*m1 + c1)
+            yy = yy - baseline
+            y[:,isweep] = yy[ipre-ilast:ipost-ilast,0] # [isweep,ichannel,isample]
+        return(t,y)
     # -------------
-        
-    def get_signal_props(self,reschannel,trgchannel):
+
+# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+
+    def extract_res_props(self,reschannel,trgchannel):
         # Find the peaks and other parameters of the respose (EPSP/EPSC)
         # fh = plt.figure()
         # ah1 = plt.subplot(211)
@@ -721,7 +797,7 @@ class EphysClass:
             yr.resize(max(yr.shape))
             yt.resize(max(yt.shape))
 
-    def get_stimprops(self,trgchannel):
+    def extract_stim_props(self,trgchannel):
         # get information about stimulation from the trigger channel
         # properties:
         # nstim: number of stimulations
@@ -731,7 +807,7 @@ class EphysClass:
         itrg = [channelspec['id'] for channelspec in self.channelspecs if re.search(trgchannel,channelspec['name'])]
         t = np.arange(self.tstart,self.tstop,self.si)
         # find the trigger pulses
-        triggerthres = 500
+        triggerthres = 3
         for isweep in np.arange(0,self.nsweeps):
             yt = self.data[isweep,itrg,:] # [isweep,ichannel,isample]
             yt.resize(self.samplesize)
@@ -740,9 +816,9 @@ class EphysClass:
             self.stimprop[isweep]["nstim"] = self.nstim
             [self.stimprop[isweep]["istims"].append(istim) for istim in istims]
             [self.stimprop[isweep]["tstims"].append(t[istim]) for istim in istims]
-            self.stimprop[isweep]["isi"] = np.mean(np.diff(self.stimprop[isweep]["tstims"]))
-            if (np.isnan(self.stimprop[isweep]["isi"])):
-                self.stimprop[isweep]["isi"] = 0
+            self.stimprop[isweep]["isi"] = 0
+            if(len(self.stimprop[isweep]["tstims"])>1):
+                self.stimprop[isweep]["isi"] = np.mean(np.diff(self.stimprop[isweep]["tstims"]))
             # ------------------
         for isweep in np.arange(0,self.nsweeps):
             nstim = self.stimprop[isweep]["nstim"]
@@ -753,19 +829,6 @@ class EphysClass:
         self.isi = np.round(np.array([self.stimprop[sweep]["isi"] for sweep in self.sweeps]).mean(),2)
         # =======================================
         
-    def find_opposing_peak_pair(t1,x1,t2,x2,isi):
-        # Find the best positive_negative peak pair that has similar peak and is separated by isi
-        # find positive and negative peaks with similar amplitudes
-        # !!!!!! NOT IMPLEMENTED !!!!!
-        # ix1 = np.argsort(x1)
-        # ix2 = np.searchsorted(x1[ix1],x2,side='left')
-        # imin = np.argmin(np.arange(0,len(ix2)) - ix2)
-        pass
-    
-
-    def series_res_vclamp(self,signal_name):
-        # Measure series resistance in a current-clamp sweep"
-        pass
     
     def __del__(self):
         print("Object has been deleted")
