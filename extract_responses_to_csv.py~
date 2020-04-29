@@ -59,15 +59,11 @@ for row in range(0,masterdf.shape[0]):
     # ephys.show([],[1,2,3,4,5])           # [channels],[sweeps]
     t,y = ephys.extract_response(reschannel,trgchannel,-0.01,0.1,min_isi=0)
     colnames.append("t")
-    # fh = plt.figure()
-    # ah = fh.add_subplot(111)
-    # ah.plot(t,y)
-    # plt.show()
     # -----------
     [colnames.append(fileid+"_sweep"+str(sweep)) for sweep in ephys.sweeps]
     # print(colnames)
     # open pandas dataframe to populate data
-    roidf = pd.DataFrame(columns=colnames,data=np.concatenate((t,y),axis=1))
+    roidf = pd.DataFrame(columns=colnames,data=np.concatenate((t[np.newaxis].T,y),axis=1))
     roidf.to_csv(os.path.join(mainpath,fileid)+".csv")
     # print(roidf)
     # input('key')

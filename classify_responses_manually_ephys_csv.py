@@ -6,6 +6,7 @@ import pandas as pd
 import os
 import re
 import sys
+from scipy.signal import find_peaks
 
 class traceClassifier:
     # classify each trace(column) in df (df) into a label (given in labels)  
@@ -16,9 +17,6 @@ class traceClassifier:
         self.key = None
         self.fh = _fh
         self.df = _df
-        # create empty data frames to hold the data for each label
-        self.data = []
-        [self.data.append(pd.DataFrame({})) for i in np.arange(0,len(self.labels))]
         self.traces = [acolumn for acolumn in self.df.columns if re.search("[0-9]{8,8}.*sweep[0-9]+",acolumn)]
         self.ntraces = len(self.traces)
         self.initialize()
@@ -30,6 +28,12 @@ class traceClassifier:
         else:
             return(None)
 
+    def restart(self):
+        print("*********  restarting classification ***********")
+        [self.ah[i].clear() for i in np.arange(0,len(self.ah))]
+        self.initialize()
+
+        
     def get_tracenames(self):
         return(self.traces)
         
@@ -42,6 +46,10 @@ class traceClassifier:
         if(event.name == "key_press_event"):
             self.key = event.key
             print(self.key)
+            if (self.key == 'x'):
+                self.restart()
+                print('***** restarting form 0 *****')
+                
             self.check_end_of_trace()
             for i in np.arange(0,len(self.labels)):
                 if ((self.key == self.labels[i]["key"]) and (not self.endoftrace)):
@@ -55,6 +63,9 @@ class traceClassifier:
         self.itrace = 0
         self.t = self.df['t']
         self.y = self.df[self.traces[self.itrace]]
+        # create empty data frames to hold the data for each label
+        self.data = []
+        [self.data.append(pd.DataFrame({})) for i in np.arange(0,len(self.labels))]
         # generate a figure window with axes equals to the number of labels+1
         # self.fh = plt.figure(figsize=(5,5))
         # create axis for each label in labels
@@ -72,17 +83,38 @@ class traceClassifier:
         self.ph[0].set_ydata(self.df[self.traces[self.itrace]])
         self.ph[0].set_color("red")
         # set titles of plots
-        [self.ah[iaxis].set_title("test") for iaxis in np.arange(0,len(self.ah))]
+        titles = ["Current trace"]
+        [titles.append(label["attr"]) for label in self.labels]
+        [self.ah[iaxis].set_title(titles[iaxis],fontweight='bold') for iaxis in np.arange(0,len(self.ah))]
         # update the current trace axis limits
-        for j in [0]:
+        self.update_axislimits([0])
+
+    def update_axislimits(self,iaxis):
+        # find positive and negative peak and set the real peak to be the one with high abs value
+        istim = np.where(self.t>0)[0][0]
+        ibuffpoints = 10+istim
+        ipeak,_ = find_peaks(abs(self.y[ibuffpoints:]),prominence=(0.1,None),width=(10,None),height=(0.01,None))
+        if(len(ipeak)>0):
+            ipeak = ipeak[0] + ibuffpoints
+            ypeakmax = self.y[ipeak]
+            ypeakmin = self.y[ipeak]*0.25
+        else:
+            ypeakmax = max(abs(self.y[ibuffpoints:]))
+            ypeakmin = min(abs(self.y[ibuffpoints:]))
+            
+        for j in iaxis:
             if self.axislims[j]["xlims"][0]>min(self.t): self.axislims[j]["xlims"][0] = min(self.t)
             if self.axislims[j]["xlims"][1]<max(self.t):self.axislims[j]["xlims"][1] = max(self.t)
-            if self.axislims[j]["ylims"][0]>min(self.y):self.axislims[j]["ylims"][0] = min(self.y)
-            if self.axislims[j]["ylims"][1]<max(self.y): self.axislims[j]["ylims"][1] = max(self.y)
+            if (ypeakmax<0):
+                if self.axislims[j]["ylims"][0]>ypeakmax:self.axislims[j]["ylims"][0] = ypeakmax
+                if self.axislims[j]["ylims"][1]<-ypeakmin: self.axislims[j]["ylims"][1] = -ypeakmin
+            else:
+                if self.axislims[j]["ylims"][0]>-ypeakmin:self.axislims[j]["ylims"][0] = -ypeakmin
+                if self.axislims[j]["ylims"][1]<ypeakmax: self.axislims[j]["ylims"][1] = ypeakmax
             # set limits
             self.ah[j].set_xlim(self.axislims[j]["xlims"])
             self.ah[j].set_ylim(self.axislims[j]["ylims"])
-           
+        
     def refresh_plots(self):
         self.fh.canvas.draw()
         self.fh.canvas.flush_events()
@@ -102,22 +134,14 @@ class traceClassifier:
         self.ph[ilabel+1].set_ydata(yavg)
         # update the current figure if not end of trace
         self.itrace = self.itrace+1
+        self.y = self.df[self.traces[self.itrace]]
         self.check_end_of_trace()
         if (not self.endoftrace):
             self.ph[0].set_xdata(self.t)
             self.ph[0].set_ydata(self.df[self.traces[self.itrace]])
         # update the current trace axis and selected class panel axis limits
-        for j in [0,ilabel+1]:
-            if self.axislims[j]["xlims"][0]>min(self.t): self.axislims[j]["xlims"][0] = min(self.t)
-            if self.axislims[j]["xlims"][1]<max(self.t):self.axislims[j]["xlims"][1] = max(self.t)
-            if self.axislims[j]["ylims"][0]>min(yavg):self.axislims[j]["ylims"][0] = min(yavg)
-            if self.axislims[j]["ylims"][1]<max(yavg): self.axislims[j]["ylims"][1] = max(yavg)
-            # set limits
-            self.ah[j].set_xlim(self.axislims[j]["xlims"])
-            self.ah[j].set_ylim(self.axislims[j]["ylims"])
-            
-        # refresh plot
-        # self.refresh_plots()
+        self.update_axislimits([0,ilabel+1])
+        
         
     def disconnect(self):
         self.fh.canvas.mpl_disconnect(self.cidkeypress)
@@ -143,6 +167,7 @@ if(__name__ == "__main__"):
         df = pd.read_csv(os.path.join(mainpath,csvfile))
         columns = list(df.columns)
         fh = plt.figure()
+        fh.suptitle(os.path.splitext(csvfile)[0])
         classifier = traceClassifier(df,labels,fh)
         # plt.show()
         input('key')
@@ -163,6 +188,6 @@ if(__name__ == "__main__"):
         df.columns = columns
         print("New: ",df.columns)
         # save the dataframe with the new column names
-        df.to_csv(os.path.join(mainpath.csvfile))
+        df.to_csv(os.path.join(mainpath,os.path.splitext(csvfile)[0]+"_withlabel"+".csv"))
         del classifier
         plt.close(fh)

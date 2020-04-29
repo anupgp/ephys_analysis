@@ -750,7 +750,9 @@ class EphysClass:
         # declare array to hold all the responses
         nres = int((tpost-tpre)/self.si)        
         y = np.zeros((nres,self.nsweeps))
-        t = np.arange(0,(tpost-tpre),self.si)
+        # t = np.arange(0,(tpost-tpre),self.si)
+        # make t positive from the start of stim (remember tpre is -negtive)
+        # t = t-(self.stimprop[0]["tstims"][0]-tpre)
         tt = np.arange(0,(self.tstop-self.tstart),self.si)[np.newaxis].T
         # get channel ids for response and trigger channels
         ires = [channelspec['id'] for channelspec in self.channelspecs if re.search(reschannel,channelspec['name'])]
@@ -762,13 +764,15 @@ class EphysClass:
             ipre = np.where(tt>=(tstims[0]+tpre))[0][0]
             ipost = np.where(tt>=(tstims[0]+tpost))[0][0]
             yy = self.data[isweep,ires,ilast:].T # [isweep,ichannel,isample]
-            print(tt[ilast:,:].shape,yy.shape)
+            # print(tt[ilast:,:].shape,yy.shape)
             m1,c1 = np.linalg.lstsq(np.concatenate((tt[ilast:,],np.ones(tt[ilast:,].shape)),axis=1),yy,rcond=None)[0]
             baseline = (tt[ilast,:]*m1 + c1)
             yy = yy - baseline
             y[:,isweep] = yy[ipre-ilast:ipost-ilast,0] # [isweep,ichannel,isample]
+            # -------------
+        t = tt[ipre:ipost]-tstims[0]
         return(t,y)
-    # -------------
+
 
 # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 
