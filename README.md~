@@ -1,7 +1,0 @@
-# * Python code for analysis of electrophysiology data
-## Requirements (modules):
-   1. neo
-   2. numpy
-   3. scipy
-   
-## EphysClass: 
