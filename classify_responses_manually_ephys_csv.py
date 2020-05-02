@@ -12,7 +12,6 @@ class traceClassifier:
     # classify each trace(column) in df (df) into a label (given in labels)  
     def  __init__(self,_df,_labels,_fh):
         self.labels = _labels
-        self.tracelabels = []
         self.endoftrace = False
         self.key = None
         self.fh = _fh
@@ -23,10 +22,7 @@ class traceClassifier:
         self.connect()
 
     def get_ylabels(self):
-        if(self.endoftrace):
-            return(self.tracelabels)
-        else:
-            return(None)
+        return(self.tracelabels)
 
     def restart(self):
         print("*********  restarting classification ***********")
@@ -53,13 +49,15 @@ class traceClassifier:
             self.check_end_of_trace()
             for i in np.arange(0,len(self.labels)):
                 if ((self.key == self.labels[i]["key"]) and (not self.endoftrace)):
-                    self.tracelabels.append(self.key) 
+                    self.tracelabels[self.itrace] = self.key 
                     ilabel = self.labels[i]["id"]
                     # add data into the class df
                     self.data[ilabel][self.traces[self.itrace]] = self.df[self.traces[self.itrace]]
                     self.update_figure(ilabel)
 
     def initialize(self):
+        # create default labels for all traces in the object
+        self.tracelabels = ['b' for i in np.arange(0,self.ntraces)]
         self.itrace = 0
         self.t = self.df['t']
         self.y = self.df[self.traces[self.itrace]]
@@ -153,7 +151,8 @@ class traceClassifier:
 if(__name__ == "__main__"):
     
     mainpath = '/Volumes/GoogleDrive/Shared drives/Beique Lab/CURRENT LAB MEMBERS/Anup Pillai/ephys_mininum_stim/'
-    csvfiles = [afile for afile in os.listdir(mainpath) if re.search("[0-9]{8,8}_.*.csv",afile)]
+    csvfiles = [afile for afile in os.listdir(mainpath) if re.search("[0-9]{8,8}_.*exp[\d]{1,2}.csv",afile)]
+    print(str(len(csvfiles))+" csv files found: ",csvfiles)
     # create a figure window with three panels to classify each trace into success, failure or bad
     plt.ion()
     keys = ['1','0','b']
@@ -161,8 +160,7 @@ if(__name__ == "__main__"):
     attrs = ["Success","Failure","Bad"]
     nlabels = 3
     labels = [dict({"key":key,"id":id,"attr":attr}) for (key,id,attr) in zip(keys,ids,attrs)]
-    print(labels)
-    
+
     for csvfile in csvfiles:
         df = pd.read_csv(os.path.join(mainpath,csvfile))
         columns = list(df.columns)
@@ -173,6 +171,7 @@ if(__name__ == "__main__"):
         input('key')
         tracenames = classifier.get_tracenames()
         ylabels = classifier.get_ylabels()
+        print(ylabels,len(ylabels))
         # create new tracenames
         newtracenames = []
         [newtracenames.append(trace+'_'+ylabel) for trace,ylabel in zip(tracenames,ylabels)]
