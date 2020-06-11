@@ -18,8 +18,8 @@ print(masterdf)
 # open pandas dataframe to populate data
 roidf = pd.DataFrame()
 
-# for row in range(0,masterdf.shape[0]):
-for row in range(6,7):
+for row in range(0,masterdf.shape[0]):
+# for row in range(1,2):
     abfname = str(masterdf.loc[row,"abffile"])
     abffullpath = os.path.join(mainpath,datafolder,abfname)
     # skip if the abffile name is not proper
@@ -37,6 +37,26 @@ for row in range(6,7):
     exp = str(masterdf.loc[row,"exp"])
     badsweeps = str(masterdf.loc[row,"badsweeps"]).split(",")
     fileid = re.search(".*[^.abf]",abfname)[0]+'_'+"neuron"+neuron+'_'+"vc"+vclamp+'_'+"exp"+exp
+    print("Loading ABF file:\t",abfname)
+    # read the csv file with labels
+    labelfname = fileid+"_withlabel.csv"
+    if (os.path.exists(mainpath+labelfname)):
+        print("Loading LABEL file:\t",labelfname)
+        labelfile = pd.read_csv(mainpath+labelfname,header=0)
+        # crop column names to start from the first sweep
+        rawlabels = [colname for colname in list(labelfile.columns) if re.search("^[\d]{8,8}.*neuron.*",colname)]
+        print('Raw labels:\t',rawlabels)
+        # extract labels from each colname
+        labels = np.array([re.search("(?:.*sweep[\d]+_)([01b]+)",rawlabel)[1] for rawlabel in rawlabels])
+        print("sweep labels: ",labels)
+        # extract successes alone (can contain '1','0','b' for success, failure and bad
+        isuccess = [label == '1' for label in labels]
+        # get success sweeps
+        success_sweeps = np.arange(1,len(labels)+1)[isuccess]
+        print("success sweeps: ",success_sweeps)
+    else:
+        print("!!!! Label file not found !!!!!!")
+        break
     try:
         badsweeps = np.array([float(elm)-1 for elm in badsweeps],dtype=np.int)
     except:
@@ -55,7 +75,7 @@ for row in range(6,7):
     if(not os.path.exists(figpath)):
         os.mkdir(figpath)
     # ----------------    
-    lags,betas,peaks = ephys.findpeaks_template_match(reschannel,trgchannel,figpath)
+    lags,betas,peaks = ephys.findpeaks_template_match(reschannel,trgchannel,success_sweeps,figpath)
     nsweeps = len(ephys.sweeps)
     isi = ephys.isi
     for isweep in np.arange(0,betas.shape[0]):

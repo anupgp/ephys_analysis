@@ -20,6 +20,18 @@ def smooth(y,windowlen=3,window = 'hanning'):
     yy = np.convolve(w/w.sum(),s,mode='same')[windowlen-1:-windowlen+1]
     return (yy)
 
+def butter_bandpass(lowcut, highcut, fs, order=5):
+    nyq = 0.5 * fs
+    low = lowcut / nyq
+    high = highcut / nyq
+    b, a = butter(order, [low, high], btype='band')
+    return b, a
+
+def butter_bandpass_filter(data, lowcut, highcut, fs, order=5):
+    b, a = butter_bandpass(lowcut, highcut, fs, order=order)
+    y = lfilter(b, a, data)
+    return y
+
 def template_match(t,y,tt,yy):
     # fit a template to a given trace. returns icorrmac and beta
     si = np.diff(t,axis=0).mean()
@@ -110,7 +122,7 @@ class EphysClass:
         self.time = self.datetime.time().isoformat()
         # ============================================
 
-    def average_trace(self,reschan,trgchan,tpre,tpost):
+    def average_trace(self,reschan,trgchan,tpre,tpost,success_sweeps=[]):
         if(len(self.sweeps)==0):
             return()
         iresch = [channelspec['id'] for channelspec in self.channelspecs if re.search(reschan,channelspec['name'])]
@@ -124,6 +136,7 @@ class EphysClass:
         sweeps = self.sweeps
         yy = np.zeros((ipost-ipre,len(sweeps)*tstims.shape[0]))
         itrace = 0
+        print("success_sweeps: ",success_sweeps)
         for i in np.arange(0,len(sweeps)):
             y = self.data[sweeps[i],iresch,:].T
             y.resize(len(y))
@@ -143,7 +156,10 @@ class EphysClass:
                 # detrend(y,axis=0,type='linear',overwrite_data=True)
                 yy[:,itrace] = y2
                 itrace = itrace  + 1
-        yyavg = yy.mean(axis=1)[:,np.newaxis]
+        if (len(success_sweeps)>0):
+            yyavg = yy[:,success_sweeps].mean(axis=1)[:,np.newaxis]
+        else:
+            yyavg = yy.mean(axis=1)[:,np.newaxis]
         ttavg = np.arange(0,(len(yyavg))*self.si,self.si)[:,np.newaxis]
         # fh = plt.figure()
         # ah = fh.add_subplot(111)
@@ -240,7 +256,7 @@ class EphysClass:
         return(tlags,ypeaks,fh,ah)
 
         
-    def findpeaks_template_match(self,reschan,trgchan,figsavepath):
+    def findpeaks_template_match(self,reschan,trgchan,success_sweeps,figsavepath):
         # template matching algorithm
         # reschan: response channel name
         # trgchan:  stimulus trigger channel name
@@ -262,7 +278,7 @@ class EphysClass:
         # -------------
         # get template trace
         # +ve tpre is for time after stimulus onset
-        tpreavg = 0.0015            
+        tpreavg = 0.0015
         ipreavg = int(tpreavg/self.si)
         if (self.vclamp < -50):
             tsearch = 0.01
@@ -270,7 +286,7 @@ class EphysClass:
         if (self.vclamp > 10):
             tsearch = 0.02
             tpostavg = 0.2
-        yy = self.average_trace(reschan,trgchan,tpreavg,tpostavg)
+        yy = self.average_trace(reschan,trgchan,tpreavg,tpostavg,success_sweeps)
         tprestim = tpostavg
         iprestim = int(tprestim/self.si)
         # ------------
@@ -528,6 +544,8 @@ class EphysClass:
         ax = []
         ax.append(fig.add_subplot(len(ichannels),1,1))
         pannelcount=0
+        # set figure title
+        ax[0].set_title(re.search("(.*/+)(.*)",self.fname)[2])
         for i in ichannels:
             pannelcount = pannelcount + 1
             if(pannelcount>1):
@@ -714,7 +732,7 @@ class EphysClass:
         # tpost:  time of the stop of the response wrt to stimulus time
         # min_isi: minimum inter-stimulus interval between responses
         # check if isi is <= min_isi
-        if (self.stimprop[0]["nstim"] > 1):
+        if ((self.stimprop[0]["nstim"] > 1) and (min_isi>0)):
             isi = [elm["isi"] for elm in  self.stimprop if not np.isnan(elm["isi"])]
             if (len(isi)>0):
                 isi = np.mean(isi)
@@ -722,9 +740,10 @@ class EphysClass:
                     print("isi < min_isi")
                     return()
                 # ---------
+        sweeps = self.sweeps
         # declare array to hold all the responses
         nres = int((tpost-tpre)/self.si)        
-        y = np.zeros((nres,self.nsweeps))
+        y = np.zeros((nres+1,len(sweeps)))
         # t = np.arange(0,(tpost-tpre),self.si)
         # make t positive from the start of stim (remember tpre is -negtive)
         # t = t-(self.stimprop[0]["tstims"][0]-tpre)
@@ -732,18 +751,35 @@ class EphysClass:
         # get channel ids for response and trigger channels
         ires = [channelspec['id'] for channelspec in self.channelspecs if re.search(reschannel,channelspec['name'])]
         itrg = [channelspec['id'] for channelspec in self.channelspecs if re.search(trgchannel,channelspec['name'])]
-        for isweep in np.arange(0,self.nsweeps):
+        lowcut = 0.5
+        highcut = 1000
+        fs = 1/self.si
+        
+         # for isweep in np.arange(0,self.nsweeps):
+        for isweep in range(0,len(sweeps)):
             tstims = self.stimprop[isweep]["tstims"]
             istims = self.stimprop[isweep]["istims"]
             ilast = self.iholdsteps[isweep]["neg"][-1]
-            ipre = np.where(tt>=(tstims[0]+tpre))[0][0]
-            ipost = np.where(tt>=(tstims[0]+tpost))[0][0]
-            yy = self.data[isweep,ires,ilast:].T # [isweep,ichannel,isample]
+            ipre = np.where(tt>(tstims[0]+tpre))[0][0]
+            ipost = np.where(tt>(tstims[0]+tpost))[0][0]
+            # t = tt[ipre:ipost]-tstims[0]
+            yy = self.data[sweeps[isweep],ires,ilast:].T # [isweep,ichannel,isample]
             # print(tt[ilast:,:].shape,yy.shape)
+            # yy = smooth(yy,windowlen=21,window='hanning')
+            yy = butter_bandpass_filter(yy[:,0],lowcut,highcut,fs,order=2)[:,np.newaxis]
             m1,c1 = np.linalg.lstsq(np.concatenate((tt[ilast:,],np.ones(tt[ilast:,].shape)),axis=1),yy,rcond=None)[0]
             baseline = (tt[ilast,:]*m1 + c1)
             yy = yy - baseline
-            y[:,isweep] = yy[ipre-ilast:ipost-ilast,0] # [isweep,ichannel,isample]
+            print(isweep,tpre,tpost,ipre,ipost,ilast)
+            yy = yy[(ipre-ilast):(ipost-ilast),0] # [isweep,ichannel,isample]
+            print(yy.shape)
+            y[0:len(yy),isweep] = yy - yy[0]
+            # fh = plt.figure()
+            # ah = fh.add_subplot(111)
+            # ah.plot(t,y)
+            # ah.set_title("sweep: "+str(isweep))
+            # plt.show()
+            # plt.close()
             # -------------
         t = tt[ipre:ipost]-tstims[0]
         return(t,y)
@@ -810,13 +846,3 @@ class EphysClass:
         pass
 
     
-# -----------------------
-def smooth(y,windowlen=3,window = 'hanning'):
-    s = np.concatenate([y[windowlen-1:0:-1],y,y[-2:-windowlen-1:-1]])
-    if (window == 'flat'):
-        w = np.ones(windowlen,dtype='double')
-    else:
-        w = eval('np.'+window+'(windowlen)')
-        # -----------
-    yy = np.convolve(w/w.sum(),s,mode='same')[windowlen-1:-windowlen+1]
-    return (yy)

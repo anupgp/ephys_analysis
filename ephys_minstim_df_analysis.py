@@ -3,6 +3,56 @@ import pandas as pd
 from matplotlib import pyplot as plt
 import re
 import os
+import plotting_functions
+
+def plot_histogram(fh,ah,data,nbins,ltedge,rtedge,color,alpha=1,draw_mean_std=False,setxlims=False):
+    # edges start from zero and go both directions (left & right edges)
+    binsize =round( (rtedge-ltedge)/nbins,2)
+    edges = np.round(np.arange(ltedge,rtedge,binsize),2)
+    hist = np.histogram(data,edges,density=True)[0]
+    print('hist sum: ',hist.sum())
+    # w = round(np.mean(np.diff(edges)),2)
+    w = binsize
+    print("binsize: {}".format(binsize))
+    for i in np.arange(0,len(edges)-1):
+        print('{} : {} --> {}'.format(edges[i],edges[i+1],hist[i]))
+    # calc bin width for two lists
+    ah.bar(edges[:-1]+w/2,hist,width=w,color=color,edgecolor='lightgrey',alpha=alpha)
+    # plot mean and std lines
+    if (draw_mean_std):
+        ah.vlines(data.mean(),min(hist),max(hist),color='k')
+        ah.vlines(data.mean()+(2*data.std()),min(hist),max(hist),color='gray')
+    if (setxlims):
+        xlims = [data.mean()-(4*data.std()),data.mean()+(4*(data.std()))]
+        ah.set_xlim(xlims)
+    return(fh,ah,edges,hist)
+
+def compute_hist(df,column,nedges):
+    edges = []
+    hnoise = []
+    hres = []
+    if(len(df)<=0):
+        print("empty")
+        return(edges,hoise,hres)
+    print(df["fileid"].unique())
+    print(df["neuronid"].unique())
+    print(df["vclamp"].unique())
+    noise = df[df["istim"]==0][column].to_numpy()
+    res = df[df["istim"]==1][column].to_numpy()
+    y = np.concatenate((noise,res))
+    ltedge = round(min(y))
+    rtedge = round(max(y))
+    fh = plt.figure()
+    ah = fh.add_subplot(111)
+    # title = "Neuron: "+str(df.loc[0,"neuronid"])+", VClamp: "+str(df.loc[0,"vclamp"])+ ", Fileid: " + str(df.loc[0,"fileid"])
+    title = "Neuron: "+str(df.loc[0,"neuronid"])+", VClamp: "+str(df.loc[0,"vclamp"])
+    fh,ah = plotting_functions.format_plot(fh,ah,xlab="Peak EPSC (pA)",ylab=" Probability density",title=title)
+    fh,ah,edges,hnoise = plot_histogram(fh,ah,noise,nedges,ltedge,rtedge,alpha=1,color='red',draw_mean_std=True)
+    fh,ah,edges,hres = plot_histogram(fh,ah,res,nedges,ltedge,rtedge,alpha=0.5,color='blue',draw_mean_std=False,setxlims=False)
+    plt.show()
+    plt.close('all')
+    return([edges,hnoise,hres])
+
 
 mainpath = '/Volumes/GoogleDrive/Shared drives/Beique Lab/CURRENT LAB MEMBERS/Anup Pillai/ephys_mininum_stim/'
 dfname = "ephys_analysis_minstim_V2.csv"
@@ -23,44 +73,39 @@ df["neuronid"] = df["neuronid"].astype("int16")
 df["istim"] = df["istim"].astype("int16")
 df["isweep"] = df["isweep"].astype("int16")
 df["nsweeps"] = df["nsweeps"].astype("int16")
-# 
-fh = plt.figure()
-ah = fh.add_subplot(111)
+# filter bad experiments/cells
+badfileids = ["17511028","17511030","17511032","17512000","17512002"]
+df = df[~df.fileid.isin(badfileids)]
 print(df.columns)
-noisepeaks = df[(df["istim"] == 0) & (df["vclamp"] == -70)]["peak"].to_numpy()
-respeaks = df[(df["istim"] == 1) & (df["vclamp"] == -70)]["peak"].to_numpy()
-nedges = 70
-allpeaks = np.concatenate((noisepeaks,respeaks))
-edges = np.arange(min(allpeaks),max(allpeaks),(max(allpeaks)-min(allpeaks))/nedges)
-noisehist = np.histogram(noisepeaks,edges)[0]
-reshist = np.histogram(respeaks,edges)[0]
-print(len(noisepeaks),edges,noisehist)
-ah.bar(edges[:-1],noisehist,np.mean(np.diff(edges)),alpha = 1,color="red")
-ah.bar(edges[:-1],reshist,np.mean(np.diff(edges)),alpha = 0.5,color="blue")
-plt.show()
-
-# compute histogram for each neuron at each vclamp
-ncells = len(df["neuronid"].unique())
-nvclamps = len(df["vclamp"].unique())
-nedges = 50
-noisehist = np.zeros((ncells,nvclamps,nedges))
-reshist = np.zeros((ncells,nvclamps,nedges))
-
-def compute_hist(df,column,nedges):
-    noise = df[df["istim"]==0][column].to_numpy()
-    res = df[df["istim"]==1][column].to_numpy()
-    y = np.concatenate((noise,res))
-    edges = np.arange(min(y),max(y),(max(y)-min(y))/nedges)
-    hnoise = np.histogram(noise,edges)[0]
-    hres = np.histogram(res,edges)[0]
-    fh = plt.figure()
-    ah = fh.add_subplot(111)
-    width = np.mean(np.diff(edges))
-    ah.bar(edges[:-1],hnoise,width=width,alpha=1,color='grey')
-    ah.bar(edges[:-1],hres,width=width,alpha=0.5,color='blue')
-    ah.set_title(df.loc[0,"id"])
-    plt.show()
-    return([edges,hnoise,hres])
-
-histdf = df.groupby(["neuronid","vclamp"]).apply(compute_hist,column="peak",nedges=50)
-print(histdf)
+# save data frame
+dfname2 = "ephys_analysis_minstim_5badfiles_excluded.csv"    
+df.to_csv("".join((mainpath,dfname2)))
+"Plot histograms"
+# --------------------------
+# print(df.columns)
+# vclamps = [-70,40]
+# print("Number of Neurons:\t{}:\t{}".format(len(df.neuronid.unique()),df.neuronid.unique()))
+# for vclamp in vclamps:
+#     noisepeaks = df[(df["istim"] == 0) & (df["vclamp"] == vclamp)]["peak"].to_numpy()
+#     respeaks = df[(df["istim"] == 1) & (df["vclamp"] == vclamp)]["peak"].to_numpy()
+#     nedges = 41
+#     allpeaks = np.concatenate((noisepeaks,respeaks))
+#     ltedge = round(min(allpeaks))
+#     rtedge = round(max(allpeaks))
+#     fh = plt.figure()
+#     ah = fh.add_subplot(111)
+#     fh,ah = plotting_functions.format_plot(fh,ah,xlab="Peak EPSC (pA)",ylab=" Probability density",title="")
+#     fh,ah,_,_ = plot_histogram(fh,ah,noisepeaks,nedges,ltedge,rtedge,alpha=1,color='red',draw_mean_std=True)
+#     fh,ah,_,_ = plot_histogram(fh,ah,respeaks,nedges,ltedge,rtedge,alpha=0.5,color='blue',setxlims = False)
+# plt.show()
+# # compute histogram for each neuron at each vclamp
+# ncells = len(df["neuronid"].unique())
+# nvclamps = len(df["vclamp"].unique())
+# nedges = 41
+# noisehist = np.zeros((ncells,nvclamps,nedges))
+# reshist = np.zeros((ncells,nvclamps,nedges))
+# # ---------
+# histdf = df.groupby(["neuronid","vclamp"]).apply(compute_hist,column="peak",nedges=51)
+# print(histdf)
+# df.groupby(["fileid"]).apply(lambda x: print(x.info()))
+# print(histdf)

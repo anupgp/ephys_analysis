@@ -2,6 +2,7 @@ import numpy as np
 from matplotlib import pyplot as plt
 import matplotlib
 matplotlib.use("TkAgg")
+ # matplotlib.use("agg")
 import pandas as pd
 import os
 import re
@@ -152,7 +153,6 @@ if(__name__ == "__main__"):
     
     mainpath = '/Volumes/GoogleDrive/Shared drives/Beique Lab/CURRENT LAB MEMBERS/Anup Pillai/ephys_mininum_stim/'
     csvfiles = [afile for afile in os.listdir(mainpath) if re.search("[0-9]{8,8}_.*exp[\d]{1,2}.csv",afile)]
-    print(str(len(csvfiles))+" csv files found: ",csvfiles)
     # create a figure window with three panels to classify each trace into success, failure or bad
     plt.ion()
     keys = ['1','0','b']
@@ -160,7 +160,10 @@ if(__name__ == "__main__"):
     attrs = ["Success","Failure","Bad"]
     nlabels = 3
     labels = [dict({"key":key,"id":id,"attr":attr}) for (key,id,attr) in zip(keys,ids,attrs)]
-
+    print("All CSV files:\t",csvfiles)
+    # csvfilesf = [csvfile for csvfile in csvfiles if re.search("^17512016.*",csvfile)]
+    # print("Filtered CSV files:\t",csvfilesf)
+    # input('key')
     for csvfile in csvfiles:
         df = pd.read_csv(os.path.join(mainpath,csvfile))
         columns = list(df.columns)
@@ -187,6 +190,6 @@ if(__name__ == "__main__"):
         df.columns = columns
         print("New: ",df.columns)
         # save the dataframe with the new column names
-        df.to_csv(os.path.join(mainpath,os.path.splitext(csvfile)[0]+"_withlabel"+".csv"))
+        # df.to_csv(os.path.join(mainpath,os.path.splitext(csvfile)[0]+"_withlabel"+".csv"))
         del classifier
         plt.close(fh)
