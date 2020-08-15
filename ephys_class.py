@@ -2,10 +2,11 @@ from neo import AxonIO
 import numpy as np
 from matplotlib import pyplot as plt
 import matplotlib.font_manager as font_manager
-from scipy.signal import find_peaks
 import re
 from scipy import interpolate
 from scipy.signal import butter, lfilter, freqz, detrend
+from scipy.signal import find_peaks
+from scipy.optimize import curve_fit
 import plotting_functions
 import os
 
@@ -104,6 +105,7 @@ class EphysClass:
             self.sres = np.zeros((int(self.nsweeps)))
             self.nstim = 0
             self.stimprop = [dict({"nstim":0,"isi":0,"istims":[],"tstims":[]}) for sweep in np.arange(0,self.nsweeps)]
+            self.clampprop = [dict({"iclamps":[],"tclamps":[]}) for sweep in np.arange(0,self.nsweeps)]
         # initialize good sweeps
         self.sweeps = np.setdiff1d(np.arange(0,self.nsweeps),self.badsweeps)
         # extract channel/signal properties for each signal/channel from header
@@ -538,7 +540,10 @@ class EphysClass:
             # load data if not already loaded
         if(not self.loaddata):
             self.data = self.__loaddata()
-        
+        if not (all(isinstance(x,int) for x in ichannels)):
+            print("Channel indices must be integers")
+            exit()
+            
         t = np.arange(self.tstart,self.tstop,self.si)
         fig = plt.figure()
         ax = []
@@ -840,9 +845,141 @@ class EphysClass:
                     self.isi = np.round(np.array([self.stimprop[sweep]["isi"] for sweep in self.sweeps]).mean(),2)
                     # ------------------
     # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-    
+    def estimate_tau_access_res_from_epsp(self,resch,clampch):
+        # estimate the tau and access resistance from charging by fitting a charging equation
+        def charging_equation(t,a0,a1,tau):
+            return(a0+a1*(np.exp(t/tau)))
+        # ------------------
+        sweeps = self.sweeps
+        iclampch = [channelspec['id'] for channelspec in self.channelspecs if re.search(clampch,channelspec['name'])]
+        iresch = [channelspec['id'] for channelspec in self.channelspecs if re.search(resch,channelspec['name'])]
+        t = np.arange(self.tstart,self.tstop,self.si)
+        yy = self.data[:,iclampch,:].T # [isweep,ichannel,isample]
+        # find the start and end of the current pulse from the clamp currrent
+        inegpeaks = np.zeros(self.nsweeps,dtype = np.int)
+        ipospeaks = np.zeros(self.nsweeps,dtype = np.int)
+        for isweep in np.arange(0,self.nsweeps):
+            y = yy[:,0,isweep]
+            dy = np.diff(y,n=1,axis=0)
+            # find all negative peaks above threshold
+            ineg_peaksall, _ = find_peaks(-dy,height=10,threshold=10)
+            # find the negative peak after tstart
+            # ineg_peak = ineg_peaksall[np.where(ineg_peaksall>=istart)[0][0]]
+            inegpeaks[isweep] = ineg_peaksall[np.argmax(dy[ineg_peaksall])]-1
+            # find all positive peaks above threshold
+            ipos_peaksall, _ = find_peaks(dy,height=10,threshold=10)
+            # find the positive peak before tstop
+            # ipos_peak = ipos_peaksall[np.where(ipos_peaksall>istop)[0][0]]
+            ipospeaks[isweep] = ipos_peaksall[np.argmax(dy[ipos_peaksall])]-1
+            ipeaksall = np.sort(np.concatenate((ineg_peaksall,ipos_peaksall)))
+            [self.clampprop[isweep]["iclamps"].append(iclamp) for iclamp in ipeaksall]
+            [self.clampprop[isweep]["tclamps"].append(t[iclamp]) for iclamp in ipeaksall]
+                
+        # --------------
+        avg_step_dur = (t[ipospeaks]-t[inegpeaks]).mean()
+        ifitfirst = int(inegpeaks.mean())
+        ifitlast = int(ipospeaks.mean())
+        istep = yy[:,0,:].mean(axis=1)[ifitlast] - yy[:,0,:].mean(axis=1)[ifitfirst]
+        iscale = 1e-12
+        vscale = 1e-3
+        print(istep)
+        avg_y = self.data[sweeps,iresch,:].T.mean(axis=1)
+        yc = avg_y[ifitfirst:ifitlast]-avg_y[ifitfirst]
+        tc = t[ifitfirst:ifitlast]-t[ifitfirst]
+        # perform constrained optimization
+        popt, pcov = curve_fit(charging_equation,tc, yc)
+        print(popt)
+        tau = abs(popt[-1])
+        access_res = ((popt[0]+popt[1])*vscale)/(istep*iscale)
+        print("Tau = ",tau)
+        print("Access resistance = {} {}".format(access_res/1e6,"M ohms"))
+        # popt, pcov = curve_fit(charging_equation,tc, yc, bounds=([-100,-100,-100], [10, 10, 10]))
+        # display the results
+        # fh = plt.figure(figsize=(10,8))
+        # ah = fh.add_subplot(111)
+        # ah.plot(tc,yc)
+        # plt.plot(tc, charging_equation(tc, *popt), 'g--')
+        # ah.plot(t,yy[:,0,:].mean(axis=-1))
+        # ah.plot(t[ifitfirst],yy[:,0,:].mean(axis=1)[ifitfirst],color="red",marker='o',markersize=10)
+        # ah.plot(t[ifitlast],yy[:,0,:].mean(axis=1)[ifitlast],color="red",marker='o',markersize=10)
+        # plt.show()
+        return(tau)
+        
+    def deconvolve_crop_reconvolve(self,resch,clampch,trgch):
+        # A method to extract individual voltage traces from an EPSP containing multiple short ISIs
+        # This method is first described in the paper by Richardson & Silberberg, J Physio., 2008
+        def integration_forward_scheme(x0,istimstart,dt,tau,d):
+            v = np.zeros((len(d)+1))
+            v[istimstart] = x0
+            for i in np.arange(istimstart+1,len(v)):
+                v[i] = v[i-1] + (dt*(d[i-1] - v[i-1])/tau)
+            return(v)
+        # ----------------
+        if(len(self.sweeps) == 0):
+            return()
+        iresch = [channelspec['id'] for channelspec in self.channelspecs if re.search(resch,channelspec['name'])]
+        itrgch = [channelspec['id'] for channelspec in self.channelspecs if re.search(trgch,channelspec['name'])]
+        # ---------------
+        tstims = np.array([self.stimprop[sweep]["tstims"] for sweep in self.sweeps])
+        istims = np.array([self.stimprop[sweep]["istims"] for sweep in self.sweeps])
+        isi = np.array([self.stimprop[sweep]["isi"] for sweep in self.sweeps])
+        iisi = np.array([int(self.stimprop[sweep]["isi"]/self.si) for sweep in self.sweeps if not np.isnan(self.stimprop[sweep]["isi"])])
+        sweeps = self.sweeps
+        # load the full trace
+        yy = self.data[sweeps,iresch,:].T 
+        t = np.arange(0,(yy.shape[0]+2)*self.si,self.si)
+        t = t[0:yy.shape[0]]
+        t = t - t[0]
+        t.resize((len(t),1))
+        si = self.si;
+        # tau = self.estimate_tau_access_res_from_epsp(resch,clampch)*2.5
+        tau = self.estimate_tau_access_res_from_epsp(resch,clampch)*1.5
+        tclamps = np.array([self.clampprop[sweep]["tclamps"] for sweep in self.sweeps])
+        iclamps = np.array([self.clampprop[sweep]["iclamps"] for sweep in self.sweeps])
+        print("tclamps: ",len(tclamps),iclamps)
+        print("tstims: ",tstims)
+        prestimbaselinedur = 0.001
+        resdur = 0.017
+        ydeconv = np.zeros((len(t)-1,len(istims),len(sweeps)))
+        yreconv = np.zeros((len(t),len(istims),len(sweeps)))
+        fh = plt.figure(figsize=(8,5))
+        ah = fh.add_subplot(111)
+        baselines = np.zeros((len(t),len(sweeps)))
+        for i in np.arange(0,len(sweeps)):
+        # for i in np.arange(0,1):
+            y = smooth(yy[:,i],windowlen=31,window='hanning')
+            # y = yy[:,i]
+            t1 = t[iclamps[i][-1]:]
+            y1 = y[iclamps[i][-1]:]
+            # m1,c1 = np.linalg.lstsq(np.concatenate((t1,np.ones((len(t1),1))),axis=1),y1,rcond=None)[0]
+            # baselines[:,i] = (t*m1 + c1)[:,0]
+            m2,m1,c1 = np.linalg.lstsq(np.concatenate((pow(t1,1.5),t1,np.ones((len(t1),1))),axis=1),y1,rcond=None)[0]
+            baselines[:,i] = (pow(t,1.5)*m2 + t*m1 + c1)[:,0]
+            y = y - baselines[:,i]
+            dy = np.diff(y,n=1)
+            d = ((dy/si)*tau) + y[0:-1]
+            d = smooth(d,windowlen=7,window='hanning')
+            # crop the individual responses
+            for j in range(0,len(istims[i])):
+                isstart = istims[i][j] + int(prestimbaselinedur/si)
+                isstop = istims[i][j] + int(resdur/si)
+                ydeconv[isstart:isstop,j,i] = d[isstart:isstop]
+                yreconv[:,j,i] = integration_forward_scheme(y.mean(),isstart,si,tau,ydeconv[:,j,i])
+                # ----------------------
+        # plotting
+        for i in np.arange(0,len(sweeps)):
+            ah.plot(t,yy[:,i]-baselines[:,i],color="grey")
+            ah.plot(t,yreconv[:,:,i].sum(axis=1),color="black",linewidth=3)
+            for j in range(len(tstims[i])):
+                # ah.plot(t[:-1],ydeconv[:,j,:])
+                ah.plot(t,yreconv[:,j,i],color="red")
+                # plot stimulus position
+                ah.plot([tstims[i][j],tstims[i][j]],[0,1],color="blue")
+        plt.show()
+
+                    
     def __del__(self):
-        print("Object has been deleted")
+        print("Object of EphysClass has been deleted")
         pass
 
     

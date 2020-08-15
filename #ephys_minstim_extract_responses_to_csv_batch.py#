@@ -63,14 +63,14 @@ for row in range(0,masterdf.shape[0]):
     # ah.plot(t,y)
     # plt.show()
     # -----------
-    # colnames.append("t")
-    # [colnames.append(fileid+"_sweep"+str(sweep)) for sweep in np.arange(0,ephys.nsweeps)]
-    # print(colnames)
-    #  # open pandas dataframe to populate data
-    # print(t.shape,y.shape,len(colnames))
-    # roidf = pd.DataFrame(columns=colnames,data=np.concatenate((t,y),axis=1))
-    # roidf.to_csv(os.path.join(mainpath,fileid)+".csv")
-    # print(roidf)
+    colnames.append("t")
+    [colnames.append(fileid+"_sweep"+str(sweep)) for sweep in np.arange(0,ephys.nsweeps)]
+    print(colnames)
+     # open pandas dataframe to populate data
+    print(t.shape,y.shape,len(colnames))
+    roidf = pd.DataFrame(columns=colnames,data=np.concatenate((t,y),axis=1))
+    roidf.to_csv(os.path.join(mainpath,fileid)+".csv")
+    print(roidf)
     # input('key')
 
     
