@@ -903,9 +903,9 @@ class EphysClass:
         # ah.plot(t[ifitfirst],yy[:,0,:].mean(axis=1)[ifitfirst],color="red",marker='o',markersize=10)
         # ah.plot(t[ifitlast],yy[:,0,:].mean(axis=1)[ifitlast],color="red",marker='o',markersize=10)
         # plt.show()
-        return(tau)
+        return(tau,access_res)
         
-    def deconvolve_crop_reconvolve(self,resch,clampch,trgch):
+    def deconvolve_crop_reconvolve(self,resch,clampch,trgch,plot=False):
         # A method to extract individual voltage traces from an EPSP containing multiple short ISIs
         # This method is first described in the paper by Richardson & Silberberg, J Physio., 2008
         def integration_forward_scheme(x0,istimstart,dt,tau,d):
@@ -913,8 +913,31 @@ class EphysClass:
             v[istimstart] = x0
             for i in np.arange(istimstart+1,len(v)):
                 v[i] = v[i-1] + (dt*(d[i-1] - v[i-1])/tau)
+            
             return(v)
         # ----------------
+        def plot_results(t,yy,yreconv,ipeaks,tstims):
+            fh = plt.figure(figsize=(8,5))
+            ah = fh.add_subplot(111)
+            si = t[1]-t[0]
+            prestim = 0.05
+            iprestim = int(prestim/si)
+            poststim = 0.5
+            ipoststim = int(poststim/si)
+            for i in np.arange(0,yy.shape[1]):
+                itfirst = int(tstims[i,0]/si) - iprestim
+                itlast = int(tstims[i,-1]/si) + ipoststim
+                ah.plot(t[itfirst:itlast],yy[itfirst:itlast,i]-baselines[itfirst:itlast,i],color="grey")
+                ah.plot(t[itfirst:itlast],yreconv[itfirst:itlast,:,i].sum(axis=1),color="black",linewidth=3)
+                for j in range(len(tstims[i])):
+                    # ah.plot(t[:-1],ydeconv[:,j,:])
+                    ah.plot(t[itfirst:itlast],yreconv[itfirst:itlast,j,i],color="red")
+                    # display peaks
+                    ah.plot(t[ipeaks[i,j]],yreconv[ipeaks[i,j],j,i],'o',markersize=5,color="blue")
+                    # plot stimulus position
+                    ah.plot([tstims[i][j],tstims[i][j]],[0,1],color="blue")
+            return(fh,ah)
+        # -------------
         if(len(self.sweeps) == 0):
             return()
         iresch = [channelspec['id'] for channelspec in self.channelspecs if re.search(resch,channelspec['name'])]
@@ -933,17 +956,17 @@ class EphysClass:
         t.resize((len(t),1))
         si = self.si;
         # tau = self.estimate_tau_access_res_from_epsp(resch,clampch)*2.5
-        tau = self.estimate_tau_access_res_from_epsp(resch,clampch)*1.5
+        tau,access_res = self.estimate_tau_access_res_from_epsp(resch,clampch)
+        # adjust tau to take into account of tau the synapse
+        tau = tau *1.5
         tclamps = np.array([self.clampprop[sweep]["tclamps"] for sweep in self.sweeps])
         iclamps = np.array([self.clampprop[sweep]["iclamps"] for sweep in self.sweeps])
-        print("tclamps: ",len(tclamps),iclamps)
-        print("tstims: ",tstims)
+        peaks = np.zeros((len(sweeps),len(istims[0])))
+        ipeaks = np.zeros((len(sweeps),len(istims[0])),dtype=np.int)
         prestimbaselinedur = 0.001
         resdur = 0.017
         ydeconv = np.zeros((len(t)-1,len(istims),len(sweeps)))
         yreconv = np.zeros((len(t),len(istims),len(sweeps)))
-        fh = plt.figure(figsize=(8,5))
-        ah = fh.add_subplot(111)
         baselines = np.zeros((len(t),len(sweeps)))
         for i in np.arange(0,len(sweeps)):
         # for i in np.arange(0,1):
@@ -964,19 +987,14 @@ class EphysClass:
                 isstart = istims[i][j] + int(prestimbaselinedur/si)
                 isstop = istims[i][j] + int(resdur/si)
                 ydeconv[isstart:isstop,j,i] = d[isstart:isstop]
-                yreconv[:,j,i] = integration_forward_scheme(y.mean(),isstart,si,tau,ydeconv[:,j,i])
+                yreconv[:,j,i] = integration_forward_scheme(0,isstart,si,tau,ydeconv[:,j,i])
+                ymax = max(np.abs(yreconv[:,j,i]))
+                ipeaksall,_ = find_peaks(np.abs(yreconv[:,j,i]),prominence = ymax/2)
+                ipeaks[i,j] = ipeaksall[0]
+                peaks[i,j] = yreconv[ipeaks[i,j],j,i]
                 # ----------------------
-        # plotting
-        for i in np.arange(0,len(sweeps)):
-            ah.plot(t,yy[:,i]-baselines[:,i],color="grey")
-            ah.plot(t,yreconv[:,:,i].sum(axis=1),color="black",linewidth=3)
-            for j in range(len(tstims[i])):
-                # ah.plot(t[:-1],ydeconv[:,j,:])
-                ah.plot(t,yreconv[:,j,i],color="red")
-                # plot stimulus position
-                ah.plot([tstims[i][j],tstims[i][j]],[0,1],color="blue")
-        plt.show()
-
+        fh,ah = plot_results(t,yy,yreconv,ipeaks,tstims)
+        return(peaks,fh,ah)
                     
     def __del__(self):
         print("Object of EphysClass has been deleted")
