@@ -37,7 +37,6 @@ for row in range(0,masterdf.shape[0]):
     clampmode = str(masterdf.loc[row,"clampmode"])
     stimpower = masterdf.loc[row,"laserstimpower"]
     dob = masterdf.loc[row,"dob"]
-    stimmode = str(masterdf.loc[row,"stimmode"])
     ephys = EphysClass(abffile,loaddata=True)
     # ephys.info()
     ephys.extract_stim_props(trgch)
@@ -53,13 +52,14 @@ for row in range(0,masterdf.shape[0]):
         for isweep in np.arange(0,peaks.shape[0]):
             for istim in np.arange(0,peaks.shape[1]):
                 record = {"ephysfile":ephysfile,"neuronid":neuronid}
-                record.update({"expdate":datefolder,"cellfolder":cellfolder,"dendrite":dendriteid})
+                record.update({"expdate":datefolder,"cellfolder":cellfolder,"dendriteid":dendriteid})
                 record.update({"spineid":spineid,"nstims":nstims,"nsweeps":nsweeps})
                 record.update({"isweep": isweep+1, "isi":isi,"istim":istim+1,"clampmode":clampmode})
                 record.update({"peak":peaks[isweep,istim]})
                 record.update({"accessres":accessres/1E6,"tau":tau*1E3,"dob":dob,"stimpower":stimpower})
                 roidf = roidf.append(record,ignore_index = True) # append a record per stim
-        # plt.show()
+        plt.show()
+        input()
         plt.close()
             # ----------
     # print(roidf)
@@ -67,4 +67,4 @@ for row in range(0,masterdf.shape[0]):
 # -----------------
 # save the dataframe
 dfname = "ephys_analysis_epsp_clustered_input.csv"
-roidf.to_csv(os.path.join(masterdfpath,dfname),index=False)
+# roidf.to_csv(os.path.join(masterdfpath,dfname),index=False)
