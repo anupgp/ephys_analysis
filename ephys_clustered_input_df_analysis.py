@@ -6,15 +6,22 @@ from matplotlib import pyplot as plt
 import re
 import os
 import datetime
-from plotting_functions import format_plot
+from plotting_functions import format_plot,colors_hex
 
-dfpath = "/Users/macbookair/goofy/data/beiquelab/pfc_clusterd_inputs"
-dfname = "ephys_analysis_epsp_clustered_input.csv"
+# analysis of clustered glutamate uncaging at proximal spines on PFC neurons
+# dfpath = "/Users/macbookair/goofy/data/beiquelab/pfc_clusterd_inputs"
+# dfname = "ephys_analysis_epsp_clustered_input.csv"
+
+# analysis of clustred glutamate uncaging at proximal spines on CA1 neurons
+dfpath = "/home/anup/gdrive-beiquelab/CURRENT LAB MEMBERS/Anup Pillai/ca1_uncaging_cluster/"
+dfname = "ephys_analysis_epsp_clustered_input_hcca1.csv"
 
 # load data
 with open(os.path.join(dfpath,dfname),'r') as csvfile:
     df = pd.read_csv(csvfile)
 
+print(df)
+input()
 # preprocessing
 # change column data types
 df["expdate"] = pd.to_datetime(df["expdate"],format="%Y%m%d")
@@ -74,6 +81,7 @@ def normalize(df):
     outdf.reset_index(inplace=True)
     # create multiindex
     outdf = outdf.set_index(["epsptype"]).sort_index()
+    print("outdf",outdf)
     # keep only peak and npeak columns
     outdf = outdf[["peak","npeak"]]
     # print(outdf)
@@ -103,17 +111,18 @@ ndf.reset_index(inplace=True)
 ndf = ndf.set_index(["expdate","neuronid","dendriteid",cidx]).sort_index()
 # drop epsptype column
 ndf = ndf.drop(["epsptype"],axis=1)
-print(ndf)
 # compute average per epsptype
 grouped = ndf.groupby(["epsptype"])
 avgdf = grouped[["peak","npeak"]].apply(lambda x:pd.DataFrame({"mean":np.mean(x),"sem":np.std(x)/np.sqrt(len(x))}))
 avgpeakdf = avgdf.xs("peak",level=1)
 avgnpeakdf = avgdf.xs("npeak",level=1)
-plotdf = avgnpeakdf
-print(plotdf)
-
+# plotdf = avgnpeakdf
+plotdf = avgpeakdf
+paramname = "peak"
 # plot summation
-colorcycle = ['#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f']
+# colorcycle = ['#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f']
+# colorcycle = ['#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf', '#1f77b4', '#ff7f0e']
+colorcycle = colors_hex
 fh1 = plt.figure(figsize=(8,6))
 ah = fh1.add_subplot(111)
 fh1,ah = format_plot(fh1,ah)
@@ -133,18 +142,23 @@ count = 0
 for name,group in grouped:
     # xvals = group.index.get_level_values("epsptype").values
     xvals = np.array([0,1,2,3,4,5,6])-0.2
-    line, = ah.plot(xvals,group["npeak"],marker='o',linestyle='--',linewidth=1,markersize=7,color = colorcycle[count])
+    line, = ah.plot(xvals,group[paramname],marker='o',linestyle='--',linewidth=1,markersize=7,color = colors_hex[count])
+    # line, = ah.plot(xvals,group["npeak"],marker='o',linestyle='--',linewidth=1,markersize=7)
     count = count + 1
     # linecolors.append(line.get_color())
 
 ah.set_xlabel(None,fontsize=16)
-ah.set_ylabel("% EPSP amplitude ",fontsize=18)
-ah.set_xticklabels(plotdf.index,rotation=45)
+# ah.set_ylabel("EPSP amplitude (%) ",fontsize=18)
+ah.set_ylabel("EPSP amplitude (mV)",fontsize=18)
+ah.set_xticks(list(plotdf.index))
+ah.set_xticklabels(labels = list(plotdf.index),rotation=45)
 ah.set_frame_on(True)
 # ah.axes.get_xaxis().set_visible(False)
 ah.spines["bottom"].set_color("white")
+# print("plot colors: ",linecolors)
 # save figure
-figname = "pfc_clustered_inputs_epsp_summation_normalized.png"
+# figname = "pfc_clustered_inputs_epsp_summation_normalized.png"
+figname = "pfc_clustered_inputs_epsp_summation_mvolts.png"
 fh1.savefig(os.path.join(dfpath,figname),dpi=300)
 plt.show()
 
@@ -221,7 +235,7 @@ fh2.subplots_adjust(
     hspace=0.2,
     wspace=0.2
 )
-param = "ratio"
+param = "peak2"
 fh2,ah = format_plot(fh2,ah)
 ah.errorbar(avgfdf.xs([param],level=[1]).index,avgfdf.xs([param],level=[1])["mean"],
             yerr=avgfdf.xs([param],level=[1])["sem"],
@@ -239,6 +253,7 @@ for name,group in grouped:
     xvals = group["isi"].values
     print(group)
     line, = ah.plot(xvals,group[param],marker='o',linestyle='--',linewidth=1,markersize=7,color = colorcycle[count])
+    # line, = ah.plot(xvals,group[param],marker='o',linestyle='--',linewidth=1,markersize=7)
     count = count + 1
     # linecolors.append(line.get_color())
 
@@ -247,10 +262,12 @@ ah.set_xlabel("\nInter-stimulus interval (ms)",fontsize=16)
 ah.xaxis.set_major_formatter(matplotlib.ticker.ScalarFormatter())
 ah.xaxis.set_major_formatter(matplotlib.ticker.FormatStrFormatter("%.0f"))
 ah.set_xticks([30,40,50,100,500,1000])
-ah.set_ylabel("Paired-pulse ratio (EPSP$_2$ / EPSP$_1$) \n",fontsize=16)
+# ah.set_ylabel("Paired-pulse ratio (EPSP$_2$ / EPSP$_1$) \n",fontsize=16)
+ah.set_ylabel("Paired-pulse EPSP$_2$ (mV) \n",fontsize=16)
 # save figure
-fig2name = "pfc_clustered_inputs_paired_pulse_ratio.png"
-# fh2.savefig(os.path.join(dfpath,fig2name),dpi=300)
+# fig2name = "pfc_clustered_inputs_paired_pulse_ratio.png" 
+fig2name = "pfc_clustered_inputs_paired_pulse_epsp2.png"
+fh2.savefig(os.path.join(dfpath,fig2name),dpi=300)
 plt.show()
 
 
