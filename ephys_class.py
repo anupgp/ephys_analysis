@@ -5,12 +5,17 @@ import matplotlib.font_manager as font_manager
 import matplotlib.gridspec as gridspec
 import re
 from scipy import interpolate
-from scipy.signal import butter, lfilter, freqz, detrend
+from scipy import signal
+from scipy.signal import freqz, detrend
 from scipy.signal import find_peaks
+from scipy.fft import fft,fftfreq,ifft
+# from scipy.signal import correlate
 from scipy.optimize import curve_fit
 import plotting_functions
 import os
-
+import emd
+from sklearn.decomposition import FastICA
+import datetime
 
 def smooth(y,windowlen=3,window = 'hanning'):
     s = np.concatenate([y[windowlen-1:0:-1],y,y[-2:-windowlen-1:-1]])
@@ -22,60 +27,30 @@ def smooth(y,windowlen=3,window = 'hanning'):
     yy = np.convolve(w/w.sum(),s,mode='same')[windowlen-1:-windowlen+1]
     return (yy)
 
-def butter_bandpass(lowcut, highcut, fs, order=5):
-    nyq = 0.5 * fs
-    low = lowcut / nyq
-    high = highcut / nyq
-    b, a = butter(order, [low, high], btype='band')
-    return b, a
+def butter_bandpass(x,fl,fh,fs,order):
+    fnyq = fs/2
+    fl = fl/fnyq
+    fh = fh/fnyq
+    sos = signal.butter(N=order,Wn=[fl,fh],btype='bandpass',output='sos')
+    xf = signal.sosfiltfilt(sos,x)
+    return(xf)
+# }
 
-def butter_bandpass_filter(data, lowcut, highcut, fs, order=5):
-    b, a = butter_bandpass(lowcut, highcut, fs, order=order)
-    y = lfilter(b, a, data)
-    return y
+def expfn(x,a1,tau1,a2,tau2):
+    y = ((a1*np.exp(-(x)/tau1)) + (a2*np.exp(-(x)/tau2))).flatten()
+    return(y)
 
-def template_match(t,y,tt,yy):
-    # fit a template to a given trace. returns icorrmac and beta
-    si = np.diff(t,axis=0).mean()
-    isearch = len(y)-len(yy)
-    corr = np.zeros(isearch)
-    # y = y - y.max()
-    # yy = yy - yy.max()
-    # normalize response so that the correlation is amplitude independent
-    yn = (y - y.mean(axis=0))/y.std(axis=0)
-    yyn = (yy - yy.mean(axis=0))/yy.std(axis=0)
-    # yn = yn - yn[0,0]
-    # yyn = yyn - yyn[0,0]
-    # yn = yn - yn.max()
-    # yyn = yyn - yyn.max()
-    # perform correlation between the actual trace and the template
-    for k in np.arange(0,isearch):
-        corr[k] = np.correlate(yn[k:(k+len(yy)),0],yyn[:,0])
-        # get the index at which the correlation is maximum
-    icorrmin = corr.argmin()
-    if (icorrmin > 0):
-        icorrmax = corr[0:icorrmin].argmax()
-    else:
-        icorrmax = corr.argmax()
-        print(len(y),len(yy),isearch,icorrmax)
-        # fh = plt.figure()
-        # ah = fh.add_subplot(111)
-        # ah.plot(corr)
-        # plt.show()
-        # solve normal equation/lstsqr to estimate beta
-    beta = np.linalg.lstsq(yy,y[icorrmax:icorrmax+len(yy)],rcond=None)[0][0]
-    # fh = plt.figure()
-    # ah = fh.add_subplot(111)
-    # ah.plot(t,y)
-    # tt = np.arange(0,len(yy)*si,si)
-    # ah.plot(tt+t[icorrmax],yy*beta)
-    # plt.show()
-    print(icorrmax,beta[0])
-    return(icorrmax,beta[0],yy)
+def alphafn(x,t0,a,tr,td):
+    if (td == tr):
+        td = tr + 0.1
+    tp = t0 + (td*tr/(td-tr) * np.log10(td/tr))
+    b = 1/(-np.exp(((t0-tp)/tr)) + np.exp(((t0-tp)/td)))
+    y = a*b*(np.exp((t0-x)/td) - np.exp((t0-x)/tr))
+    return(y)
 
 class EphysClass:
     
-    def __init__(self,fname,loaddata=True,badsweeps=-1,vclamp=None,cclamp = None,fid=None):
+    def __init__(self,fname,loaddata=True,badsweeps=-1,vclamp=None,cclamp = None,fid=None,clampch="",resch="",stimch=""):
         self.fname = fname
         self.fid = fid
         if(fid  == None):
@@ -85,6 +60,10 @@ class EphysClass:
         self.badsweeps = badsweeps
         self.vclamp = vclamp
         self.cclamp = cclamp
+        self.clampch = clampch
+        self.resch = resch
+        self.stimch = stimch
+        # }
         if(not os.path.exists(self.fname)):
             print("The file does not exist! check the path!")
             return()
@@ -129,413 +108,57 @@ class EphysClass:
         self.time = self.datetime.time().isoformat()
         # ============================================
 
-    def average_trace(self,reschan,trgchan,tpre,tpost,success_sweeps=[]):
-        if(len(self.sweeps)==0):
-            return()
-        iresch = [channelspec['id'] for channelspec in self.channelspecs if re.search(reschan,channelspec['name'])]
-        itrgch = [channelspec['id'] for channelspec in self.channelspecs if re.search(trgchan,channelspec['name'])]
-        isi = np.array([self.stimprop[sweep]["isi"] for sweep in self.sweeps])
-        iisi = np.array([int(self.stimprop[sweep]["isi"]/self.si) for sweep in self.sweeps])
-        tstims = np.array([self.stimprop[sweep]["tstims"] for sweep in self.sweeps])
-        istims = np.array([self.stimprop[sweep]["istims"] for sweep in self.sweeps])
-        ipost = int(tpost/self.si)
-        ipre = int(tpre/self.si)
-        sweeps = self.sweeps
-        yy = np.zeros((ipost-ipre,len(sweeps)*tstims.shape[0]))
-        itrace = 0
-        print("success_sweeps: ",success_sweeps)
-        for i in np.arange(0,len(sweeps)):
-            y = self.data[sweeps[i],iresch,:].T
-            y.resize(len(y))
-            t = np.arange(0,y.shape[0]*self.si,self.si)[:,np.newaxis]
-            # get baseline by linear fitting
-            y = smooth(y,windowlen=21,window='hanning')
-            m1,c1 = np.linalg.lstsq(np.concatenate((t,np.ones((len(t),1))),axis=1),y,rcond=None)[0]
-            baseline = (t*m1 + c1)
-            y = y - baseline[:,0]
-            for j in np.arange(0,len(tstims[i])):
-                if (j == (len(tstims[i])-1)):
-                    y2 = y[istims[i][j]+ipre:(istims[i][j]+ipost)]
-                    t2 = t[istims[i][j]+ipre:(istims[i][j]+ipost)]
-                else:
-                    y2 = y[istims[i][j]+ipre:istims[i][j+1]]
-                    t2 = t[istims[i][j]+ipre:istims[i][j+1]]
-                    # detrend(y,axis=0,type='linear',overwrite_data=True)
-                yy[:,itrace] = y2
-                itrace = itrace  + 1
-        if (len(success_sweeps)>0):
-            yyavg = yy[:,success_sweeps].mean(axis=1)[:,np.newaxis]
-        else:
-            yyavg = yy.mean(axis=1)[:,np.newaxis]
-            ttavg = np.arange(0,(len(yyavg))*self.si,self.si)[:,np.newaxis]
-            # fh = plt.figure()
-            # ah = fh.add_subplot(111)
-            # ah.plot(ttavg,yyavg,color='k')
-            # ah.set_title(str(int(isi.mean()*1000))+" ms")
-            # plt.show()
-        return(yyavg)
-
-    def find_peaks(self,reschan,trgchan,plotdata=True,peakdir='+'):
-        if(len(self.sweeps) == 0):
-            return([],[],[])
-        iresch = [channelspec['id'] for channelspec in self.channelspecs if re.search(reschan,channelspec['name'])]
-        itrgch = [channelspec['id'] for channelspec in self.channelspecs if re.search(trgchan,channelspec['name'])]
+    def find_neg_peaks(self,resch,stimch):
         # -------------
-        tstims = np.array([self.stimprop[sweep]["tstims"] for sweep in self.sweeps])
-        istims = np.array([self.stimprop[sweep]["istims"] for sweep in self.sweeps])
-        tpre = 0.01
-        tpost = 0.1
-        ipost = int(tpost/self.si)
-        tstimsfst = tstims-tpre
-        ipre = int(tpre/self.si)
-        istimsfst = istims-ipre
-        isi = np.array([self.stimprop[sweep]["isi"] for sweep in self.sweeps])
-        iisi = np.array([int(self.stimprop[sweep]["isi"]/self.si) for sweep in self.sweeps if not np.isnan(self.stimprop[sweep]["isi"])])
-        # ------------
-        if (all(isi)>0):
-            tstimslst = [min(tstims[i][j]+tpost,tstims[i][j]+isi[i]) for i in np.arange(0,len(self.sweeps)) for j in np.arange (0,len(tstims[i]))]
-        else:
-            tstimslst = [max(tstims[i][j]+tpost,tstims[i][j]+isi[i]) for i in np.arange(0,len(self.sweeps)) for j in np.arange (0,len(tstims[i]))]
-            tstimslst = np.array(tstimslst)
-            tstimslst = tstimslst.reshape(tstimsfst.shape)
-            tpost = [min(tstims[i][-1]+tpost,tstims[i][-1]+isi[i]) for i in np.arange(0,len(self.sweeps))]
-            tpost = np.array(tpost)[:,np.newaxis]
-            # -------------
-        if (all(isi)>0):
-            istimslst = [min(istims[i][j]+ipost,istims[i][j]+iisi[i]) for i in np.arange(0,len(self.sweeps)) for j in np.arange (0,len(istims[i]))]
-        else:
-            istimslst = [max(istims[i][j]+ipost,istims[i][j]+iisi[i]) for i in np.arange(0,len(self.sweeps)) for j in np.arange (0,len(istims[i]))]
-            istimslst = np.array(istimslst)
-            istimslst = istimslst.reshape(istimsfst.shape)
-            iposts = [min(istims[i][-1]+ipost,istims[i][-1]+iisi[i]) for i in np.arange(0,len(self.sweeps))]
-            iposts = np.array(iposts)[:,np.newaxis]        
-            print("tstimsfst: ",tstimsfst,tstimsfst.shape)
-            print("tstimslst: ",tstimslst,tstimslst.shape)
-            # input('key')
-            # ------------
-            # holds extracted lag and peak values
-        tlags = np.zeros((istimsfst.shape[1]))
-        tpeaks = np.zeros((istimsfst.shape[1]))
-        ypeaks = np.zeros((istimsfst.shape[1]))
-        searchwin = int(0.1/self.si) # 0.07
-        # ------------
-        sweeps = self.sweeps
-        ioffset = int(self.vclampsteps[0]["ipost"][-1])
-        print(ioffset)
+        # a method to extract reponse peaks
+        # get the stimulus times
+        iresch = [channelspec['id'] for channelspec in self.channelspecs if re.search(resch,channelspec['name'])]
+        istimch = [channelspec['id'] for channelspec in self.channelspecs if re.search(stimch,channelspec['name'])]
+        iholdsteps = self.iholdsteps
+        stimprop = self.stimprop
+        sweeps = self.goodsweeps
+        si = self.si
+        y = self.data[:,iresch,:]
+        t = np.arange(0,y.shape[-1]*si,si).reshape(y.shape[-1],1)
+        ystim = np.zeros((y.shape[-1],1),dtype=np.float)
+        tstim = np.arange(0,y.shape[-1]*si,si)
+        toffsetpre = 0.01
+        ioffsetpre = int(toffsetpre/si)
+        toffsetpost = 0.05
+        ioffsetpost = int(toffsetpost/si)
+        ypeaks = np.zeros((len(sweeps),1))
         fh = plt.figure()
         ah = fh.add_subplot(111)
-        fh,ah = format_plot(fh,ah,xlab = "Time(ms)",ylab="("+self.channelspecs[0]["units"]+")",title=self.fid)
-        y = self.data[sweeps,iresch,ioffset:].T # load the full trace
-        t = np.arange(0,(y.shape[0]+2)*self.si,self.si)
-        t = t[0:y.shape[0]]
-        t = t - t[0]
-        t.resize((len(t),1))
-        for i in np.arange(0,len(sweeps)):
-            y[:,i ] = smooth(y[:,i],windowlen=21,window='hanning')
-            m1,c1 = np.linalg.lstsq(np.concatenate((t,np.ones((len(t),1))),axis=1),y[:,i],rcond=None)[0]
-            baseline = (t*m1 + c1)
-            y[:,i] = y[:,i] - baseline[:,0]
-            
-        yavg = y.mean(axis=1).T[:,np.newaxis]
-        for j in np.arange(0,len(istimsfst[0])):
-            ifst = istimsfst[0][j]-ioffset
-            ilst = istimslst[0][j]-ioffset
-            if(peakdir == '+'):
-                ipeaks,_ = find_peaks(yavg[ifst:(ifst+searchwin),0],prominence=(0.08,None),width=(50,None),height=(0.2,None))
-            if(peakdir == '-'):
-                ipeaks,_ = find_peaks(-yavg[ifst:(ifst+searchwin),0],prominence=(0.08,None),width=(50,None),height=(0.2,None))
-                ah.plot(t[ifst:ilst+ioffset],y[ifst:ilst+ioffset,:],color='gray')
-                ah.plot([t[ifst],t[ifst]],[0,1],'g')
-                ah.plot([t[ilst],t[ilst]],[0,1],'r')
-            try:
-                ipeak = ipeaks[0]
-                tpeaks[j] = t[ifst+ipeak,0]
-                tlags[j] = t[ifst+ipeak,0]-t[ifst,0]
-                ypeaks[j] = yavg[ifst+ipeak,0]
-                ah.plot(tpeaks[j],ypeaks[j],marker='o',markersize=10,color='k')
-            except:
-                print("!!!!! peaks not found !!!")
-                # --------------
-        ah.plot(t,yavg)
-        ah.set_xlim([t[istimsfst[0][0]-ioffset,0]-0.02,t[istimslst[0][-1]-ioffset,0]+0.1])
-        if (plotdata):
-            plt.show()
-        return(tlags,ypeaks,fh,ah)
-    
-    # ======================================================
-    def findpeaks_template_match(self,reschan,trgchan,success_sweeps,figsavepath):
-        # template matching algorithm
-        # reschan: response channel name
-        # trgchan:  stimulus trigger channel name
-        # get channel ids for response and trigger channels
-        plt.ion()
-        fh = plt.figure()
-        ah = fh.add_subplot(111)
-        ph = []
-        # add 4 dummy plots
-        # ph = ah.plot(0,0)[0]
-        [ph.append(ah.plot(0,0,color='k')[0]) for i in np.arange(0,3)]
-        fh,ah = plotting_functions.format_plot(fh,ah,xlab="Time (s)",ylab="EPSC (pA)",title="")
+        # ------------------
+        for s in range(0,len(sweeps)):
+            isweep = sweeps[s]
+            istims = stimprop[isweep]["istims"]
+            isi = stimprop[isweep]["isi"]
+            # create stim starts and stops
+            # start/end positions of each stimultions, including the dummy at the start
+            ibegins = np.concatenate(([istims[0] - ioffsetpre],istims)) 
+            iends = np.concatenate((istims,[istims[-1] + ioffsetpost]))
+            # ----------------------
+            ysub = smooth(self.data[isweep,iresch,iholdsteps[isweep]["pos"][0]:istims[0]][0],windowlen=61,window='hanning')
+            tsub = np.arange(0,(len(ysub)+1)*self.si,self.si)[0:len(ysub)][np.newaxis].T
+            m1,c1 = np.linalg.lstsq(np.concatenate((tsub,np.ones(tsub.shape)),axis=1),ysub,rcond=None)[0]
+            # ---------------------
+            tsweep = t[ibegins[0]:iends[-1]]
+            ysweep = y[isweep,iresch,ibegins[0]:iends[-1]].reshape(tsweep.shape) - (m1*tsweep + c1)
+            ysweep = ysweep - max(ysweep)
+            ysweep = smooth(ysweep[:,0],windowlen=31,window="hanning").reshape(len(ysweep),1)
+            ipeak = np.argmin(ysweep)
+            tpeak = tsweep[ipeak,0]
+            ypeak = ysweep[ipeak,0]
+            ypeaks[s,0] = ypeak
+            ah.plot(tsweep,ysweep)
+            ah.plot(tpeak,ypeak,'o',markersize=10)
+            # ----------------
+        # }
         plt.show()
-        # --------------------
-        if(len(self.sweeps) == 0):
-            return()
-        iresch = [channelspec['id'] for channelspec in self.channelspecs if re.search(reschan,channelspec['name'])]
-        itrgch = [channelspec['id'] for channelspec in self.channelspecs if re.search(trgchan,channelspec['name'])]
-        # -------------
-        # get template trace
-        # +ve tpre is for time after stimulus onset
-        tpreavg = 0.0015
-        ipreavg = int(tpreavg/self.si)
-        if (self.vclamp < -50):
-            tsearch = 0.01
-            tpostavg = 0.05
-        if (self.vclamp > 10):
-            tsearch = 0.02
-            tpostavg = 0.2
-            yy = self.average_trace(reschan,trgchan,tpreavg,tpostavg,success_sweeps)
-            tprestim = tpostavg
-            iprestim = int(tprestim/self.si)
-            # ------------
-            # add null stimulus before the first stimulus
-        tstims = np.array([self.stimprop[sweep]["tstims"] for sweep in self.sweeps])
-        tstims = np.concatenate(((tstims[:,0]-tprestim)[np.newaxis].reshape((tstims.shape[0],1)),tstims),axis=1)
-        istims = np.array([self.stimprop[sweep]["istims"] for sweep in self.sweeps])
-        istims = np.concatenate(((istims[:,0]-iprestim)[np.newaxis].reshape((istims.shape[0],1)),istims),axis=1)
-        isi = np.array([self.stimprop[sweep]["isi"] for sweep in self.sweeps])
-        iisi = np.array([int(self.stimprop[sweep]["isi"]/self.si) for sweep in self.sweeps if not np.isnan(self.stimprop[sweep]["isi"])])
-        # yy[:,0] = yy[:,0] - yy[0,0]
-        # yyn = (yy[:,0] - yy.mean(axis=0))/yy.std(axis=0)
-        tt = np.arange(0,(yy.shape[0]+2)*self.si,self.si)[:,np.newaxis]
-        tt = tt[0:yy.shape[0]]  # tt is a column vector
-        # np array to hold the individual deconvolved traces for each sweep
-        yd = np.zeros((tstims.shape[0],tstims.shape[1],self.samplesize))
-        betas = np.zeros(tstims.shape)
-        peaks = np.zeros(tstims.shape)
-        lags = np.zeros(tstims.shape)
-        mins = np.zeros(tstims.shape)
-        maxs = np.zeros(tstims.shape)
-        mints = np.zeros(tstims.shape)
-        maxts = np.zeros(tstims.shape)
-        # --------------
-        tpoststim = tpostavg + tsearch
-        ipoststim = int(tpoststim/self.si)
-        sweeps = self.sweeps
-        isearch = int(tsearch/self.si)
-        for i in np.arange(0,len(sweeps)):
-            y = self.data[sweeps[i],iresch,:].T # load the full trace. y is a column vector
-            t = np.arange(0,(y.shape[0]+2)*self.si,self.si)
-            t = t[0:y.shape[0]]
-            t.resize((len(t),1)) # t is a column vector
-            # smooth y
-            y[:,0] = smooth(y[:,0],windowlen=21,window='hanning')
-            # detrend y
-            m1,c1 = np.linalg.lstsq(np.concatenate((t,np.ones((len(t),1))),axis=1),y,rcond=None)[0]
-            ybase = (t*m1 + c1)
-            y = y - ybase
-            for j in np.arange(0,len(tstims[i])):
-                icorrmax = 0
-                if (j == (len(tstims[i])-1)):
-                    y2 = y[istims[i][j]:(istims[i][j]+(ipoststim+isearch)),:]
-                    t2 = t[istims[i][j]:(istims[i][j]+(ipoststim+isearch)),:]
-                else:
-                    y2 = y[istims[i][j]:istims[i][j+1]+(isearch),:]
-                    t2 = t[istims[i][j]:istims[i][j+1]+(isearch),:]
-                    # -----------
-                    # add previous response to template
-                    # yyn = yd[i,:,(istims[i][j]+ipre):(istims[i][j]+ipre+len(yy))].sum(axis=0) + yyn
-                icorrmax,beta,yyf = template_match(t2,y2,tt,yy)
-                betas[i,j] = beta
-                imin = np.argmin(yyf*beta)
-                imax = np.argmax(yyf*beta)
-                if ((self.vclamp < -50) and (beta>0)):
-                    peaks[i,j] = beta*yyf[imin,0]
-                    lags[i,j] = (icorrmax+imin)*self.si
-                if ((self.vclamp > 0) and (beta>0)):
-                    peaks[i,j] = beta*yyf[imax,0]
-                    lags[i,j] = (icorrmax+imax)*self.si
-                if ((self.vclamp < -50) and (beta<0)):
-                    peaks[i,j] = beta*yyf[imax,0]
-                    lags[i,j] = (icorrmax+imax)*self.si
-                if ((self.vclamp > 0) and (beta<0)):
-                    peaks[i,j] = beta*yyf[imin,0]
-                    lags[i,j] = (icorrmax+imin)*self.si
-                    # -------------
-                    # plt.cla()
-                    # plt.clf()
-                ah.set_title(self.fid+"_sweep"+str(i)+"_stim"+str(j))
-                ph[0].set_xdata(t[istims[i][j]:istims[i][j]+len(yy)])
-                ph[0].set_ydata(y[istims[i][j]:istims[i][j]+len(yy)])
-                ph[1].set_xdata(t[istims[i][j]+icorrmax:istims[i][j]+icorrmax+len(yy)])
-                ph[1].set_ydata(yyf[:,0]*beta)
-                ph[1].set_color('green')
-                ph[2].set_xdata(tstims[i][j]+lags[i,j])
-                ph[2].set_ydata(peaks[i,j])
-                ph[2].set_marker('o')
-                ph[2].set_color('k')
-                ph[2].set_markersize(10)
-                # --------------------------
-                for p in ph[0:-1]:
-                    xlims = [ah.get_xlim()[0],ah.get_xlim()[1]]
-                    ylims = [ah.get_ylim()[0],ah.get_ylim()[1]]
-                    if (xlims[0] > np.min(p.get_xdata())) or (xlims[1] < np.max(p.get_xdata())):
-                        ah.set_xlim([np.min(p.get_xdata()),np.max(p.get_xdata())])
-                    if (ylims[0] > np.min(p.get_ydata())) or (ylims[1] < np.max(p.get_ydata())):
-                        ah.set_ylim([np.min(p.get_ydata()),np.max(p.get_ydata())])
-                        # --------------
-                if(os.path.exists(figsavepath)):
-                    figname = self.fid+"_sweep"+str(i)+"_stim"+str(j)+".png"
-                    print("FIG: ",os.path.join(figsavepath,figname))
-                    fh.savefig(os.path.join(figsavepath,figname))
-                    # --------
-
-        return(lags,betas,peaks)
-    
-    # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-    
-    def template_match_avg(self,reschan,trgchan,peakdir='+'):
-        # template matching algorithm
-        # fephys: ephys file object
-        # tt: t of template
-        # yy: y of template
-        # tlag: maximum lag to search for correlations, typically 10 ms
-        # reschan: response channel name
-        # trgchan:  stimulus trigger channel name
-        # get channel ids for response and trigger channels
-        if(len(self.sweeps) == 0):
-            return()
-        iresch = [channelspec['id'] for channelspec in self.channelspecs if re.search(reschan,channelspec['name'])]
-        itrgch = [channelspec['id'] for channelspec in self.channelspecs if re.search(trgchan,channelspec['name'])]
-        # ---------------
-        tstims = np.array([self.stimprop[sweep]["tstims"] for sweep in self.sweeps])
-        istims = np.array([self.stimprop[sweep]["istims"] for sweep in self.sweeps])
-        tpre = 0.001
-        tpost = 0.2
-        ipost = int(tpost/self.si)
-        tstimsfst = tstims-tpre
-        ipre = int(tpre/self.si)
-        istimsfst = istims-ipre
-        isi = np.array([self.stimprop[sweep]["isi"] for sweep in self.sweeps])
-        iisi = np.array([int(self.stimprop[sweep]["isi"]/self.si) for sweep in self.sweeps if not np.isnan(self.stimprop[sweep]["isi"])])
-        # ------------
-        if (all(isi)>0):
-            tstimslst = [min(tstims[i][j]+tpost,tstims[i][j]+isi[i]) for i in np.arange(0,len(self.sweeps)) for j in np.arange (0,len(tstims[i]))]
-        else:
-            tstimslst = [max(tstims[i][j]+tpost,tstims[i][j]+isi[i]) for i in np.arange(0,len(self.sweeps)) for j in np.arange (0,len(tstims[i]))]
-            tstimslst = np.array(tstimslst)
-            tstimslst = tstimslst.reshape(tstimsfst.shape)
-            tpost = [min(tstims[i][-1]+tpost,tstims[i][-1]+isi[i]) for i in np.arange(0,len(self.sweeps))]
-            tpost = np.array(tpost)[:,np.newaxis]
-            # -------------
-        if (all(isi)>0):
-            istimslst = [min(istims[i][j]+ipost,istims[i][j]+iisi[i]) for i in np.arange(0,len(self.sweeps)) for j in np.arange (0,len(istims[i]))]
-        else:
-            istimslst = [max(istims[i][j]+ipost,istims[i][j]+iisi[i]) for i in np.arange(0,len(self.sweeps)) for j in np.arange (0,len(istims[i]))]
-            istimslst = np.array(istimslst)
-            istimslst = istimslst.reshape(istimsfst.shape)
-            iposts = [min(istims[i][-1]+ipost,istims[i][-1]+iisi[i]) for i in np.arange(0,len(self.sweeps))]
-            iposts = np.array(iposts)[:,np.newaxis]        
-            # =====
-        tlags = np.zeros((istimsfst.shape[1]))
-        tpeaks = np.zeros((istimsfst.shape[1]))
-        ypeaks = np.zeros((istimsfst.shape[1]))
-        searchwin = int(0.1/self.si) # 0.07
-        # ------------
-        # holds extracted lag and peak values of the deconvolved trace
-        lags = np.zeros(len(self.sweeps))
-        tpeaks = np.zeros(len(self.sweeps))
-        ypeaks = np.zeros(len(self.sweeps))
-        # get template trace
-        yy = self.average_trace(reschan,trgchan,tpre)
-        yy = yy - yy[0]
-        # normalize template so that the correlation is amplitude independent
-        yyn = (yy - np.mean(yy))/np.std(yy)
-        # yyn = yyn - yyn[0]
-        tt = np.arange(0,(yy.shape[0]+2)*self.si,self.si)[:,np.newaxis]
-        tt = tt[0:yy.shape[0]]
-        # reduce yy length
-        # yydur = 0.2
-        # iyydur = np.where(tt>=yydur)[0][0]
-        # tt = tt[0:iyydur,:]
-        # yy = yy[0:iyydur]
-        # ---------------
-        tmaxshift = 0.03
-        imaxshift = int(tmaxshift/self.si)
-        ioffset = int(self.vclampsteps[0]["ipost"][-1])
-        sweeps = self.sweeps
-        y = self.data[sweeps,iresch,ioffset:].T # load the full trace
-        t = np.arange(0,(y.shape[0]+2)*self.si,self.si)
-        t = t[0:y.shape[0]]
-        t = t - t[0]
-        t.resize((len(t),1))
-        for i in np.arange(0,len(sweeps)):
-            y[:,i ] = smooth(y[:,i],windowlen=21,window='hanning')
-            m1,c1 = np.linalg.lstsq(np.concatenate((t,np.ones((len(t),1))),axis=1),y[:,i],rcond=None)[0]
-            baseline = (t*m1 + c1)
-            y[:,i] = y[:,i] - baseline[:,0]
-            y = y.mean(axis=1).T
-            sy = np.zeros((len(y),1)) # new y from the shifted and scaled template
-            st = np.arange(0,(sy.shape[0])*self.si,self.si)
-            st.resize((len(st),1))
-            dcy = np.zeros(y.shape) # new y from the shifted and scaled template
-            ny = np.zeros(y.shape) # new y from the shifted and scaled template
-            fh = plt.figure()
-            ah = fh.add_subplot(111)
-            fh,ah = format_plot(fh,ah,xlab = "Time(ms)",ylab="("+self.channelspecs[0]["units"]+")",title=self.fid)
-        for j in np.arange(0,len(istimsfst[0])):
-            print("Sweep: ",i," Stim: ",j, " istimsfst: ", istimsfst[i][j]," istimslst: ",istimslst[i][j])
-            ifst = istimsfst[i][j]-ioffset
-            ilst = istimslst[i][j]-ioffset
-            corrlen =  min((ilst-ifst+5),yy.shape[0])
-            # array to hold the correlations at different time lags
-            corrvec = np.zeros(imaxshift)
-            # normalize response so that the correlation is amplitude independent
-            yn = (y - np.mean(y))/np.std(y)
-            # yn = (y - np.mean(y[(ifst):(ifst+corrlen)]))/np.std(y[(ifst):(ifst+corrlen)])
-            yn = yn - yn[ifst]
-            print(yn.shape,yyn.shape)
-            for k in np.arange(0,imaxshift):
-                # perform correlation between the actual trace and the template
-                corrvec[k] = np.correlate(yn[(ifst+k):(ifst+corrlen+k)],yyn[0:corrlen,0])
-                # get the index at which the correlation is maximum
-            icmax = np.where(corrvec>=np.max(corrvec))[0][0]
-            # yysolve = yy
-            yysolve = sy[(ifst+corrlen):(ifst+corrlen+yy.shape[0]),0] + yy[:,0]
-            yysolve.resize((len(yysolve),1))
-            print(y.shape,yy.shape,yysolve.shape,sy.shape,ifst+icmax, ifst+icmax+corrlen, corrlen)
-            # # solve normal equation/lstsqr to estimate beta
-            beta = np.linalg.lstsq(yysolve,y[ifst+icmax:ifst+icmax+corrlen]-y[ifst],rcond=None)[0]
-            # sy[ifst+icmax:ifst+icmax+corrlen,0] = sy[ifst+icmax:ifst+icmax+ corrlen,0] + (yysolve[:,0] * beta) # fit
-            sy[ifst+icmax:ifst+icmax+corrlen,0] = sy[ifst+icmax:ifst+icmax+ corrlen,0] + (yysolve[:,0] * beta) + y[ifst] # fit
-            dcy[ifst+icmax:ifst+icmax+corrlen] = dcy[ifst+icmax:ifst+icmax+corrlen]+ (yy[0:corrlen,0] * beta) # deconvolved
-            ny[ifst+icmax:ifst+icmax+corrlen] = y[ifst+icmax:ifst+icmax+corrlen] # part of y that is fit
-            # -----------
-            if(peakdir == '+'):
-                # ipeaks,_ = find_peaks(dcy[ifst:(ifst+searchwin)],prominence=(0.05,None),width=(30,None),height=(0.3,None))
-                ipeaks,_ = find_peaks(dcy[ifst+icmax:(ifst+icmax+searchwin)],prominence=(0.08,None),height=(0.1,None),width=(100,None))
-            try:
-                ipeak = ipeaks[0]
-                tpeaks[j] = st[ifst+ipeak+icmax,0]
-                tlags[j] = st[ifst+ipeak+icmax,0]-st[ifst,0]
-                ypeaks[j] = dcy[ifst+ipeak+icmax]
-                ah.plot(tpeaks[j],ypeaks[j],marker='o',markersize=10,color='k')
-            except:
-                print("!!!!! peaks not found !!!!!")
-                ah.plot([t[ifst],t[ifst]],[0,1],color='blue',linewidth=2,linestyle='--')
-                ah.plot([t[ilst],t[ilst]],[0,1],color='red',linewidth=2,linestyle='--')
-                # ah.plot(tt[0:corrlen]+(icmax*self.si)+t[ifst], (yy[0:corrlen]-yy[0])*beta,'k')
-        print('shapes',st.shape,dcy.shape,y.shape)
-        ah.plot(t,y,color='grey')
-        ah.plot(st,ny,color='black')
-        ah.plot(st,sy,color = 'red')
-        ah.plot(st,dcy,color='green')
-        ah.set_xlim([t[istimsfst[0][0]-ioffset,0]-0.02,t[istimslst[0][-1]-ioffset,0]+0.1])
-        # ah1.plot(t,s,'red')    
-        # ah.plot(st,sy,'g')
-        return(tlags,ypeaks,fh,ah)
-    
+        return(ypeaks)
+    # }
     # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-
     def show(self,ichannels=[],isweeps=[]):
         # display traces
         if (len(isweeps) == 0):
@@ -548,40 +171,41 @@ class EphysClass:
         if not (all(isinstance(x,int) for x in ichannels)):
             print("Channel indices must be integers")
             exit()
-            
+        # }
         t = np.arange(self.tstart,self.tstop,self.si)
         fig = plt.figure(figsize=(10,8),constrained_layout=False)
-        spec = gridspec.GridSpec(nrows=len(ichannels),ncols=1,figure=fig,width_ratios=[1],height_ratios=[4,1])
+        spec = gridspec.GridSpec(nrows=len(ichannels),ncols=1,figure=fig,width_ratios=[1],height_ratios=[1,1,1])
         ax = []
         ax.append(fig.add_subplot(spec[0,0]))
         # ax.append(fig.add_subplot(len(ichannels),1,1))
         pannelcount=0
         # set figure title
-        figtitle = "".join((re.search("(.*/+)(.*)",self.fname)[2],"\n","#sweeps = ",str(self.nsweeps)))
+        figtitle = "".join((re.search("(.*/+)(.*)",self.fname)[2],"\n","#sweeps = ",str(len(isweeps))))
         ax[0].set_title(figtitle)
         for i in ichannels:
             pannelcount = pannelcount + 1
             if(pannelcount>1):
                 ax.append(fig.add_subplot(spec[pannelcount-1,0],sharex=ax[0]))
-                # --------------
+            # }
             channelname = self.channelspecs[i]["name"]    
             channelunit = self.channelspecs[i]["units"]
             channelylabel = channelname+' (' + channelunit + ')'
             ax[pannelcount-1].set_ylabel(channelylabel)
             for j in isweeps:
-                ax[pannelcount-1].plot(t,self.data[j,i,:])
-                # ---------------
-        # ------------
+                ax[pannelcount-1].plot(t,self.data[j,i,:],label=str(j+1))
+            # }
+        # }
         # display average
-        ax[0].plot(t,self.data[:,0,:].mean(axis=0),color='k')
-        plt.show()        
+        ax[0].plot(t,self.data[isweeps,0,:].mean(axis=0),color='k')
+        # ax[0].legend()
+        plt.show()
+    # }    
     # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-
     def __loaddata(self):
         """loads all the sweeps and channels into a numpy ndarray: timeseries * sweeps * channels """
         self.data= np.zeros((self.nsweeps,self.nchannels,self.nsamples))
-        # blk = self.reader.read_block(block_index=i,lazy=False,signal_group_mode='split-all',units_group_mode='split-all')
-        blk = self.reader.read_block(lazy=False)
+        blk = self.reader.read_block(block_index=0,lazy=False,signal_group_mode='split-all')
+        # blk = self.reader.read_block(lazy=False)
         iseg = -1
         for seg in blk.segments:
             iseg = iseg + 1
@@ -590,12 +214,11 @@ class EphysClass:
                 isig = isig + 1
                 asig = asig.magnitude
                 self.data[iseg,isig,:] = asig[:,0]                
-                # print('Data reading completed')
-                # print('Data shape: ',self.data.shape)
+            # }
+        # }
         return(self.data)
-
-    # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> 
-            
+    # }
+    # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>  
     def info(self):
         channelnames = [channelspec['name'] for channelspec in self.channelspecs]
         channelunits = [channelspec['units'] for channelspec in self.channelspecs]
@@ -616,29 +239,36 @@ class EphysClass:
         print('sample size:','\t',self.samplesize)
         print('Date:','\t',self.date)
         print('Time:','\t',self.time)
+        print('----------------------------------------')
+        print('iholdsteps:\t',self.iholdsteps)
+        print('nstim:\t',self.nstim)
+        print('stimprop:\t',self.stimprop)
+        # print('isi:\t',self.isi)
         print('Series resistance','\t',self.sres,' Mohms')
         print("==================================================================")
 
     # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
         
-    def extract_indices_holdingsteps(self,clampch,NstepsPos=1,NstepsNeg=1):
+    def extract_indices_holdingsteps(self,NstepsPos=1,NstepsNeg=1):
+        clampch = self.clampch
         iclamp = [channelspec['id'] for channelspec in self.channelspecs if re.search(clampch,channelspec['name'])]
         t = np.arange(self.tstart,self.tstop,self.si)
         self.iholdsteps = [dict({"neg":np.zeros(NstepsNeg,dtype=np.uint),"pos":np.zeros(NstepsPos,dtype=np.uint)}) for sweep in np.arange(0,self.nsweeps)]
-        
+        # -----------------
         for isweep in np.arange(0,self.nsweeps):
             clamp = self.data[isweep,iclamp,:].T # [isweep,ichannel,isample]
             dclamp = np.diff(clamp,axis=0)
             dclamp.resize(max(dclamp.shape))
             # find all negative peaks above threshold
-            ineg_peaks = find_peaks(-dclamp,height=1,threshold=1)[0][0:NstepsNeg]
+            ineg_peaks = find_peaks(-dclamp,height=5,threshold=5)[0][0:NstepsNeg]
             # find all positive peaks above threshold
-            ipos_peaks = find_peaks(dclamp,height=1,threshold=1)[0][0:NstepsPos]
-            self.iholdsteps[isweep]["neg"] = ineg_peaks
-            self.iholdsteps[isweep]["pos"] = ipos_peaks
+            ipos_peaks = find_peaks(dclamp,height=5,threshold=5)[0][0:NstepsPos]
+            self.iholdsteps[isweep]["neg"] = ineg_peaks # negative direction
+            self.iholdsteps[isweep]["pos"] = ipos_peaks # positive direction
             # plotting
             # fh = plt.figure()
             # ah = fh.add_subplot(111)
+            # ah.plot(t,clamp)
             # ah.plot(t[0:len(dclamp)],dclamp)
             # inegpeaks = self.iholdsteps[isweep]["neg"]
             # ipospeaks = self.iholdsteps[isweep]["pos"]
@@ -646,9 +276,10 @@ class EphysClass:
             # ah.plot(t[inegpeaks],dclamp[inegpeaks],marker='o',color='r',markersize=10)
             # ah.plot(t[ipospeaks],dclamp[ipospeaks],marker='o',color='g',markersize=10)
             # plt.show()
-
-    #  >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>> 
-            
+        # }
+        self.vclamp = self.data[:,iclamp,:].mean().mean()
+    # }
+    #  >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>         
     def seriesres_voltageclamp(self,resch,clampch):        
         # Measure series resistance in a voltage-clamp sweep"
         ires = [channelspec['id'] for channelspec in self.channelspecs if re.search(resch,channelspec['name'])]
@@ -740,88 +371,15 @@ class EphysClass:
 
 # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 
-    def extract_response(self,reschannel,trgchannel,tpre,tpost,min_isi=0):
-        # extract signal from each sweep
-        # reschannel: response channel
-        # trgchannel: stimulus trigger channel
-        # tpre:  time of the start of the response wrt to stimulus time
-        # tpost:  time of the stop of the response wrt to stimulus time
-        # min_isi: minimum inter-stimulus interval between responses
-        # check if isi is <= min_isi
-        if ((self.stimprop[0]["nstim"] > 1) and (min_isi>0)):
-            isi = [elm["isi"] for elm in  self.stimprop if not np.isnan(elm["isi"])]
-            if (len(isi)>0):
-                isi = np.mean(isi)
-                if (isi < min_isi):
-                    print("isi < min_isi")
-                    return()
-                # ---------
-        sweeps = self.goodsweeps
-        # declare array to hold all the responses
-        nsamples = int((tpost-tpre)/self.si)
-        res = [] 
-        tt = np.arange(0,(self.tstop-self.tstart),self.si)[np.newaxis].T
-        # get channel ids for response and trigger channels
-        ires = [channelspec['id'] for channelspec in self.channelspecs if re.search(reschannel,channelspec['name'])]
-        itrg = [channelspec['id'] for channelspec in self.channelspecs if re.search(trgchannel,channelspec['name'])]
-        lowcut = 0.5
-        highcut = 1000
-        fs = 1/self.si
-        iholds = self.iholdsteps
-        # ---------------
-        for isweep in range(0,len(sweeps)):
-            tstims = self.stimprop[isweep]["tstims"]
-            istims = self.stimprop[isweep]["istims"]
-            ipos = iholds[isweep]['pos'][0]
-            print(ipos)
-            t = tt
-            yy = self.data[sweeps[isweep],ires,ipos:].T # [isweep,ichannel,isample]
-            yy = butter_bandpass_filter(yy[:,0],lowcut,highcut,fs,order=2)[:,np.newaxis]
-            m1,c1 = np.linalg.lstsq(np.concatenate((tt,np.ones(tt.shape)),axis=1),yy,rcond=None)[0]
-            baseline = (tt*m1 + c1)
-            yy = yy - baseline
-            print(tt.shape,yy.shape)
-            fh = plt.figure()
-            ah = fh.add_subplot(111)
-            ah.plot(tt[ipos:],yy)
-            plt.show()
-        #     input()
-        #     for i in range(len(istims)):
-
-        #         ifirst = np.where(tt>(tstims[i]+tpre))[0][0]
-        #         ilast = np.where(tt>(tstims[i]+tpost))[0][0]
-                
-        #         yy = self.data[sweeps[isweep],ires,ifirst:ilast].reshape((ilast-ifirst)) # [isweep,ichannel,isample]
-        #         re
-        #         input()
-                      
-        #     # print(tt[ilast:,:].shape,yy.shape)
-        #     # yy = smooth(yy,windowlen=21,window='hanning')
-
-        #     print(isweep,tpre,tpost,ipre,ipost,ilast)
-        #     yy = yy[(ipre-ilast):(ipost-ilast),0] # [isweep,ichannel,isample]
-        #     print(yy.shape)
-        #     y[0:len(yy),isweep] = yy - yy[0]
-        #     # fh = plt.figure()
-        #     # ah = fh.add_subplot(111)
-        #     # ah.plot(t,y)
-        #     # ah.set_title("sweep: "+str(isweep))
-        #     # plt.show()
-        #     # plt.close()
-        #     # -------------
-        # t = tt[ipre:ipre+len(yy)+1]-tstims[0]
-        # return(t,y)
-
-
-# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-
-    def extract_res_props(self,reschannel,trgchannel):
+    def extract_res_props(self):
         # Find the peaks and other parameters of the respose (EPSP/EPSC)
         # fh = plt.figure()
         # ah1 = plt.subplot(211)
         # ah2 = plt.subplot(212,sharex=ah1)
-        ires = [channelspec['id'] for channelspec in self.channelspecs if re.search(reschannel,channelspec['name'])]
-        itrg = [channelspec['id'] for channelspec in self.channelspecs if re.search(trgchannel,channelspec['name'])]
+        resch = self.resch
+        stimch = self.stimch
+        ires = [channelspec['id'] for channelspec in self.channelspecs if re.search(resch,channelspec['name'])]
+        itrg = [channelspec['id'] for channelspec in self.channelspecs if re.search(stimch,channelspec['name'])]
         t = np.arange(self.tstart,self.tstop,self.si)
         # find the trigger pulses
         triggerthres = 500
@@ -840,17 +398,18 @@ class EphysClass:
             yr.resize(max(yr.shape))
             yt.resize(max(yt.shape))
 
-    def extract_stim_props(self,trgchannel):
+    def extract_stim_props(self):
         # get information about stimulation from the trigger channel
         # properties:
         # nstim: number of stimulations
         # istim: index of stimulations
         # tstims: time of each stimulation
         # isi: mean inter stimulus inverval
-        itrg = [channelspec['id'] for channelspec in self.channelspecs if re.search(trgchannel,channelspec['name'])]
+        stimch = self.stimch
+        itrg = [channelspec['id'] for channelspec in self.channelspecs if re.search(stimch,channelspec['name'])]
         t = np.arange(self.tstart,self.tstop,self.si)
         # find the trigger pulses
-        triggerthres = 1000 # 3
+        triggerthres = 100 # 3
         for isweep in np.arange(0,self.nsweeps):
             yt = self.data[isweep,itrg,:] # [isweep,ichannel,isample]
             yt.resize(self.samplesize)
@@ -866,8 +425,12 @@ class EphysClass:
                     self.stimprop[isweep]["isi"] = np.mean(np.diff(self.stimprop[isweep]["tstims"]))
                     # compute average isi
                     self.isi = np.round(np.array([self.stimprop[sweep]["isi"] for sweep in self.goodsweeps]).mean(),2) # isi computed from only goodsweeps
-                    # ------------------
-                    # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+                # }
+            # }
+        # }
+    # }
+    # ------------------
+    # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
     def get_clampprop(self,resch,clampch):
         goodsweeps = self.goodsweeps
         iclampch = [channelspec['id'] for channelspec in self.channelspecs if re.search(clampch,channelspec['name'])]
@@ -952,7 +515,355 @@ class EphysClass:
         # ah.plot(t[ifitlast],yy[:,0,:].mean(axis=1)[ifitlast],color="red",marker='o',markersize=10)
         # plt.show()
         return(tau,access_res)
+    # -------------------------------------------------------
+    def get_sweeps(self,offsetdur,sweepdur):
+        resch = self.resch
+        stimch = self.stimch
+        # get channel ids for response and trigger channels
+        iresch = [channelspec['id'] for channelspec in self.channelspecs if re.search(resch,channelspec['name'])]
+        istimch = [channelspec['id'] for channelspec in self.channelspecs if re.search(stimch,channelspec['name'])]
+        iholdsteps = self.iholdsteps
+        stimprop = self.stimprop
+        sweeps = self.goodsweeps
+        si = self.si
+        sweepdurn = int(sweepdur/si)
+        offsetdurn = int(offsetdur/si)
+        stims = np.array([stimprop[i]["istims"] for i in sweeps])
+        indices = np.zeros(stims.shape,dtype=np.int)
+        indices[:,0] = stims[:,0] - offsetdurn
+        indices[:,-1] = stims[:,0] + sweepdurn
+        # X = self.data[sweeps,iresch,(stimprop[0]["istims"][0]-prestimn):(stimprop[0]["istims"][-1]+prestimn)].T
+        X = self.data[sweeps,iresch,:].T
+        X = np.array([X[indices[i,0]:indices[i,-1],i] for i in range(0,indices.shape[0])]).T
+        # X = self.data[sweeps,iresch,iholdsteps[0]["pos"][0]+offsetdurn:iholdsteps[0]["pos"][0]+offsetdurn+sweepdurn].T
+        # X -= X[0,:]
+        t = np.arange(0,len(X)*si,si)[0:len(X)].reshape(len(X),1)
+        stims = stims - stims[:,[0]]  + np.repeat(np.array([offsetdurn,offsetdurn])[np.newaxis,:],X.shape[1],axis=0)
+        tstims = t[stims,0]
+        istims = stims
+        return(t,X,tstims.T,istims.T)
+    # ------------------------------------------------------
+    def extract_response(self,tpre,tpost,min_isi=0):
+        # extract signal from each sweep
+        # reschannel: response channel
+        # trgchannel: stimulus trigger channel
+        # tpre:  time of the start of the response wrt to stimulus time
+        # tpost:  time of the stop of the response wrt to stimulus time
+        # min_isi: minimum inter-stimulus interval between responses
+        resch = self.resch
+        stimch = self.stimch
+        # get channel ids for response and trigger channels
+        ires = [channelspec['id'] for channelspec in self.channelspecs if re.search(resch,channelspec['name'])]
+        itrg = [channelspec['id'] for channelspec in self.channelspecs if re.search(stimch,channelspec['name'])]
+        # check if isi is <= min_isi
+        if ((self.stimprop[0]["nstim"] > 1) and (min_isi>0)):
+            isi = [elm["isi"] for elm in  self.stimprop if not np.isnan(elm["isi"])]
+            if (len(isi)>0):
+                isi = np.mean(isi)
+                if (isi < min_isi):
+                    print("isi < min_isi")
+                    return()
+                # ---------
+        sweeps = self.goodsweeps
+        # declare array to hold all the responses
+        nsamples = int((tpost-tpre)/self.si)
+        res = [] 
+
+        lowcut = 0.000001
+        highcut = 3000
+        fs = 1/self.si
+        iholds = self.iholdsteps # gets the start and end positions of all the holding steps in the trace
+        ioffset = int(0.1/self.si) # 100ms offset
+        yout = []
+        minsamples = 1000000
+        # ---------------
+        for s in range(0,len(sweeps)):
+            isweep = sweeps[s]
+            tstims = self.stimprop[isweep]["tstims"] # get stimulus delivery times
+            istims = self.stimprop[isweep]["istims"] # get stimulus delivery indices
+            ipos = iholds[isweep]['pos'][0]+ioffset # get the position of the postive rising phase of the clamp step
+            tt = np.arange(0,(self.tstop-self.tstart),self.si)[np.newaxis].T[ipos:]
+            yy = self.data[isweep,ires,ipos:].T # [isweep,ichannel,isample]: extract the portion of trace after the holding step
+            # yy = butter_bandpass_filter(yy[:,0],lowcut,highcut,fs,order=1)[:,np.newaxis] # CAUTION! can cause artifacts in the trace
+            # -------------
+            # print(iholds[isweep])
+            # input()
+            # [isweep,ichannel,isample]: extract the portion of trace b/w current/voltage step and first stimulus
+            ysub = smooth(self.data[isweep,ires,ipos:istims[0]][0],windowlen=101,window='hanning')
+            tsub = np.arange(0,(len(ysub)+1)*self.si,self.si)[0:len(ysub)][np.newaxis].T
+            print(tsub.shape,ysub.shape)
+            # input()
+            m1,c1 = np.linalg.lstsq(np.concatenate((tsub,np.ones(tsub.shape)),axis=1),ysub,rcond=None)[0]
+            baseline = (tt*m1 + c1)
+            yy = yy - baseline
+            yy = yy-yy[istims[0]]
+            for i in range(len(istims)):
+                ifirst = np.where(tt>(tstims[i]+tpre))[0][0]
+                ilast = np.where(tt>(tstims[i]+tpost))[0][0]
+                y = yy[ifirst:ilast].reshape((ilast-ifirst)) # [isweep,ichannel,isample]
+                y = smooth(y,windowlen=11,window='hanning')
+                # y = y - y[0]
+                t = tt[ifirst:ilast]-tt[ifirst] - tpre
+                minsamples = min(minsamples,len(t))
+                # print(minsamples,t.shape,y.shape)
+                # print(tstims[i],t.shape,y.shape)
+                yout.append(y)
+                # check the trace
+                # fh = plt.figure()
+                # ah = fh.add_subplot(111)
+                # ah.plot(t,y)
+                # # ah.plot(tsub,ysub)
+                # # ah.plot(tsub,tsub*m1 + c1)
+                # ah.set_title("".join(("sweep: ",str(isweep),", stim: ",str(i))))
+                # plt.show()
+                # plt.close()
+            # }
+        # }
+        # -------------
+        yout = [elem[0:minsamples] for elem in yout] 
+        yout = np.array(yout).T
+        t = t[0:minsamples]
+        return(t,yout)
+    # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+    def extract_traces(self,isweeps):
+        resch = self.resch
+        stimch = self.stimch
+        # get channel ids for response and trigger channels
+        ires = [channelspec['id'] for channelspec in self.channelspecs if re.search(resch,channelspec['name'])]
+        itrg = [channelspec['id'] for channelspec in self.channelspecs if re.search(stimch,channelspec['name'])]
+        sweeps = self.goodsweeps
+        iholds = self.iholdsteps # gets the start and end positions of all the holding steps in the trace
+        ioffset = int(1/self.si) # 300ms offset
+        idur = int(0.75/self.si)
+        s1 = iholds[0]["neg"][0]+ioffset
+        s2 = iholds[0]["neg"][0]+ioffset+idur
+        yy = self.data[isweeps,ires,s1:].T # [isweep,ichannel,isample]
+        yy.reshape((yy.shape[0],len(isweeps)))
+        tt = np.arange(0,self.si*yy.shape[0],self.si)
+        # fh = plt.figure()
+        # ah = fh.add_subplot(111)
+        # ah.plot(tt,yy)
+        # plt.show()
+        return(tt,yy)
+            
+    # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+    def extract_noise(self,group):
+        resch = self.resch
+        stimch = self.stimch
+        # get channel ids for response and trigger channels
+        ires = [channelspec['id'] for channelspec in self.channelspecs if re.search(resch,channelspec['name'])]
+        itrg = [channelspec['id'] for channelspec in self.channelspecs if re.search(stimch,channelspec['name'])]
+        sweeps = self.goodsweeps
+        iholds = self.iholdsteps # gets the start and end positions of all the holding steps in the trace
+        ioffset = int(1/self.si) # 300ms offset
+        idur = int(0.75/self.si)
+        avgs = np.zeros(len(sweeps),dtype=np.float)
+        noises = np.zeros(len(sweeps),dtype=np.float)
+        t = np.zeros(len(sweeps),dtype=np.float)
+        yyout = []
+        # print(self.reader)
+        # print(dir(self.reader))
+        # print(self.reader._t_starts)
+        # print(self.reader.segment_count(0))
+        # print(self.reader.segment_t_start(1,28))
+        starttime = self.reader.raw_annotations["blocks"][0]["rec_datetime"]
+        # time2 = time + datetime.timedelta(seconds=60)
+        # print(time.strftime("%H-%M"))
+        # print(time2.strftime("%H-%M"))
+        if (group == "mni"):
+            sweepid = -30
+        if (group == "pre_mni"):
+            sweepid = 5
+        # ---------------
+        for s in range(0,len(sweeps)):
+            t[s] = (starttime + datetime.timedelta(seconds = self.reader.segment_t_start(0,s))).timestamp()
+            isweep = sweeps[s]
+            yy = self.data[isweep,ires,iholds[s]["neg"][0]+ioffset:iholds[s]["neg"][0]+ioffset+idur].T # [isweep,ichannel,isample]: extract the portion of trace after the holding step
+            # yy = butter_bandpass(yy[:,0],0.1,1000,1/self.si,order=1)[:,np.newaxis] # CAUTION! can cause artifacts in the trace
+            tt = np.arange(0,self.si*idur,self.si)
+            avgs[s] = yy.mean()
+            noises[s] = yy.max()-yy.min()
+            # yyout.append(yy)
+            if (s == sweeps[sweepid]):
+                yyout = yy
+                ttout = tt
+            # fh = plt.figure()
+            # ah = fh.add_subplot(111)
+            # ah.plot(yy)
+            # plt.show()
+        # yyout = np.array(yyout).reshape(len(tt),len(sweeps))
+        return(t,avgs,noises,ttout,yyout)
+            
+    # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+    def detrend(self,resch,stimch):
+        # get the stimulus times
+        iresch = [channelspec['id'] for channelspec in self.channelspecs if re.search(resch,channelspec['name'])]
+        istimch = [channelspec['id'] for channelspec in self.channelspecs if re.search(stimch,channelspec['name'])]
+        iholdsteps = self.iholdsteps
+        stimprop = self.stimprop
+        sweeps = self.goodsweeps
+        si = self.si
+        y = self.data[:,iresch,:]
+        t = np.arange(0,y.shape[-1]*si,si).reshape(y.shape[-1],1)
+        ystim = np.zeros((y.shape[-1],1),dtype=np.float)
+        tstim = np.arange(0,y.shape[-1]*si,si)
+        toffset = 0.15
+        ioffset = int(toffset/si)
+        for s in range(0,len(sweeps)):
+            isweep = sweeps[s]
+            istims = stimprop[isweep]["istims"]
+            isi = stimprop[isweep]["isi"]
+            # create stim starts and stops
+            # start/end positions of each stimultions, including the dummy at the start
+            ibegins = np.concatenate(([istims[0] - ioffset],istims)) 
+            iends = np.concatenate((istims,[istims[-1] + ioffset]))
+            # ------------------
+            tsweep = t[iholdsteps[isweep]["pos"][0]+ioffset:iends[-1],:]
+            ysweep = y[isweep,iresch,iholdsteps[isweep]["pos"][0]+ioffset:iends[-1]].reshape(tsweep.shape)
+            m1,c1 = np.linalg.lstsq(np.concatenate((tsweep,np.ones(tsweep.shape)),axis=1),ysweep,rcond=None)[0]
+            ysweep = ysweep - (tsweep*m1 + c1)
+            # ysweep2 = smooth(ysweep[:,0],windowlen=51,window='hanning')[:,np.newaxis]
+            fr = np.fft.fftfreq(len(ysweep),si)
+            fou = np.fft.fft(ysweep[:,0])
+            #make up a narrow bandpass with a Gaussian
+            df=0.1
+            f1,f2 = 0.00001,50        # Hz
+            gpl= np.exp(- ((fr-f1)/(2*df))**2)+ np.exp(- ((fr-f2)/(2*df))**2)  # pos. frequencies
+            gmn= np.exp(- ((fr+f1)/(2*df))**2)+ np.exp(- ((fr+f2)/(2*df))**2)  # neg. frequencies
+            g=gpl+gmn    
+            filt=fou*g  #filtered spectrum = spectrum * bandpass
+            #ifft
+            ysweep2=np.real(np.fft.ifft(filt))
+            fh = plt.figure()
+            ah1 = fh.add_subplot(311)
+            ah1.plot(tsweep,ysweep)
+            ah2 = fh.add_subplot(312)
+            ah2.plot(np.fft.fftshift(fr) ,np.fft.fftshift(np.abs(fou)))
+            ah3 = fh.add_subplot(313,sharex=ah2)
+            ah3.plot(fr,np.abs(filt))
+            # -------------------------
+            # imf = emd.sift.sift(ysweep)
+            # IP,IF,IA = emd.spectra.frequency_transform( imf, 1/si, 'nht' )
+            # freq_edges,freq_bins = emd.spectra.define_hist_bins(0,10,50)
+            # hht = emd.spectra.hilberthuang( IF, IA, freq_edges )
+            #             plt.figure( figsize=(16,8) )
+            # plt.subplot(311,frameon=False)
+            # plt.plot(tsweep,ysweep,'k')
+            # for j in range(imf.shape[1]):
+            #     plt.plot(tsweep,imf[:,j]-j*2,'r')
+            # plt.xlim(tsweep[0], tsweep[-1])
+            # plt.subplot(312)
+            # plt.plot(tsweep,ysweep2)
+            # plt.plot(tsweep,imf[:,5:].sum(axis=1))
+            # plt.grid(True)
+            # plt.subplot(313)
+            # # plt.pcolormesh(tsweep[:,0], freq_bins, hht, cmap='ocean_r' )
+            # plt.ylabel('Frequency (Hz)')
+            # plt.xlabel('Time (secs)')
+            # fh = plt.figure()
+            # ah1 = fh.add_subplot(211)
+            # ah1.plot(tsweep,ysweep)
+            # for i in range(1,len(ibegins)):
+            #     ah1.plot([t[ibegins[i]],t[ibegins[i]]],[0,1],'r',linewidth=3) # stim marker
+            # # }
+            # # plot histogram
+            # ah2 = fh.add_subplot(212,sharex=ah1)
+            # ah2.plot(tsweep[:-1],np.diff(ysweep[:,0]))
+            # ----------
+
+            plt.show()
+            
+    def deconvolve_template(self,resch,stimch,ttemp,ytemp,direction,spine,path_fig): # correlate(a,v)
+        # a method to seperate EPSCs using template matching
+        # get the stimulus times
+        iresch = [channelspec['id'] for channelspec in self.channelspecs if re.search(resch,channelspec['name'])]
+        istimch = [channelspec['id'] for channelspec in self.channelspecs if re.search(stimch,channelspec['name'])]
+        iholdsteps = self.iholdsteps
+        stimprop = self.stimprop
+        sweeps = self.goodsweeps
+        print(iholdsteps)
+        print(stimprop)
+        si = self.si
+        tprestim= 0.3
+        iprestim = int(tprestim/si)
+        y = self.data[sweeps,iresch,(stimprop[0]["istims"][0]-iprestim):(stimprop[0]["istims"][-1]+iprestim)].T
+        y = y.mean(axis=1).reshape(len(y),1)
+        y -= y[0]
+        t = np.arange(0,len(y)*si,si)[0:len(y)].reshape(len(y),1)
+        if (direction == "positive"):
+            ytemp = ytemp / max(ytemp) # normalize ytemp
+        if (direction == "negative"):
+            ytemp = ytemp / min(ytemp) # normalize ytemp
+        ytemp = ytemp - ytemp[0]
+        dytemp = np.diff(ytemp[:,0])[:,np.newaxis]
+        dytemp = dytemp-dytemp[0,0]
+        dttemp = ttemp[0:-1]
+        dy = np.diff(y[:,0])[:,np.newaxis]
+        dy = dy - dy[0,0]
+        dt = t[0:-1]
+        # ------------------
+        fh = plt.figure()
+        ah = fh.add_subplot(111)
+        for s in range(0,y.shape[1]):
+            isweep = sweeps[s]
+            isi = stimprop[isweep]["isi"]
+            istims = np.array(stimprop[isweep]["istims"])
+            istims = istims-(istims[0]-iprestim)
+            istims = [0, *istims]
+            print(istims)
+            # ------------------
+            # matrices to solve AX = B
+            A = np.zeros((dy.shape[0],len(istims)),dtype=np.float)
+            # rightpos = 0
+            for i in range(0,len(istims)): # create matrix A
+                A[istims[i]:istims[i]+len(dytemp),i] = dytemp[:,0]
+            # }
+            B = np.zeros((dy.shape[0],1),dtype=np.float)
+            B[:,0] = dy[:,0]
+            X = np.linalg.lstsq(A,B,rcond=None)[0]
+            F = A*X.T
+            F = np.array([np.cumsum(F[:,k]) for k in range(0,F.shape[1])]).T
+            print(F.shape)
+            # -------------
+            if (direction == "positive"):
+                ipeaks = [np.argmax(F[:,k]) for k in range(F.shape[1])]
+                peaks = [F[ipeaks[k],k] for k in range(F.shape[1])]
+                print("peak: ",peaks)
+                # }
+            if (direction == "negative"):
+                ipeaks = [np.argmin(F[:,k]) for k in range(F.shape[1])]
+                peaks = [F[ipeaks[k],k] for k in range(F.shape[1])]
+                print("peaks: ",peaks)
+            # }
+            # ------------------
+            plotcolors=plotting_functions.colors_rgb[0:len(istims)]
+            print(plotcolors)
+            ah.plot(t,y,"grey",linewidth=3,label="actual") # actual trace
+            ah.plot(dt,F.sum(axis=1),color='black',linewidth=3,label="reconvolved") # reconvolved trace - diff
+            for k in range(F.shape[1]):
+                ah.plot(dt,F[:,k],linewidth=3,color=plotcolors[k],label = "".join(("deconvolved stim:",str(k)))) # deconvolved traces
+                ah.plot(dt[ipeaks[k]],peaks[k],'o',color='violet')
+            # ah.vlines(t[istims],0,1,"red")
+            # -------------------
+            figtitle = "".join((spine,"_sweep",str(isweep),"_isi",str(int(isi*1000))+"ms"))
+            ah.set_title(figtitle,fontsize=12)
+            # ah.set_xlim([t[ibegins[0]-1000],t[iends[-1]]])
+            # ylims = [min(X)+(min(X)*0.2),max(X)-(max(X)*10)]
+            # print(ylims)
+            # ah.set_ylim(ylims)
+            ah.legend()
+            if(len(path_fig)>10):
+                fh.savefig(os.path.join(path_fig,"".join((figtitle,".png"))),format="png",dpi=300)
+            # plt.show()
+            # plt.close('all')
+            # -------------------
+        # }
+        return(fh,ah,peaks)
+    # }
+        
+    # step 2: compute normalized cross correlation
     
+    # step 3: shift one wave to the maximum correlation
     def deconvolve_crop_reconvolve(self,resch,clampch,trgch,plot=False):
         # A method to extract individual voltage traces from an EPSP containing multiple short ISIs
         # This method is first described in the paper by Richardson & Silberberg, J Physio., 2008
@@ -984,6 +895,8 @@ class EphysClass:
                     ah.plot(t[ipeaks[i,j]],yreconv[ipeaks[i,j],j,i],'o',markersize=5,color="blue")
                     # plot stimulus position
                     ah.plot([tstims[i][j],tstims[i][j]],[0,1],color="blue")
+                # }
+            # }
             return(fh,ah)
         # -------------
         if(len(self.goodsweeps) == 0): # return if no goodsweeps found
@@ -1054,9 +967,120 @@ class EphysClass:
                 # ----------------------
         fh,ah = plot_results(t,yy,yreconv,ipeaks,tstims)
         return(peaks,fh,ah)
+
+    # ====================================================
     
     def __del__(self):
         print("Object of EphysClass has been deleted")
         pass
 
     
+    def test(self):
+        # a method to seperate EPSCs using template matching
+        # get the stimulus times
+        iresch = [channelspec['id'] for channelspec in self.channelspecs if re.search(self.resch,channelspec['name'])]
+        istimch = [channelspec['id'] for channelspec in self.channelspecs if re.search(self.stimch,channelspec['name'])]
+        iholdsteps = self.iholdsteps
+        stimprop = self.stimprop
+        sweeps = self.goodsweeps
+        print(iholdsteps)
+        print(stimprop)
+        si = self.si
+        tprestim= 0.3
+        iprestim = int(tprestim/si)
+        X = self.data[sweeps,iresch,(stimprop[0]["istims"][0]-iprestim):(stimprop[0]["istims"][-1]+iprestim)].T
+        # X -= X[0,:]
+        t = np.arange(0,len(X)*si,si)[0:len(X)].reshape(len(X),1)
+        # ------------------
+        # ica = FastICA(n_components=2)
+        # S = ica.fit_transform(X)
+        # X_  = ica.inverse_transform(S)
+        # print(S.shape)
+        # fh = plt.figure()
+        # ah = fh.add_subplot(111)
+        # ah.plot(t,X.mean(axis=1))
+        # ah.plot(t,X_.mean(axis=1))
+        # plt.show()
+        # -----------------
+        # U, S, V = np.linalg.svd(X,full_matrices=False)
+        # print(U.shape,S.shape,V.shape)
+        # X_ = np.dot(U[:,:-2] * S[:-2], V[:-2,:])
+        # fh = plt.figure()
+        # ah = fh.add_subplot(111)
+        # ah.plot(t,X.mean(axis=1))
+        # ah.plot(t,X_.mean(axis=1))
+        # plt.show()
+        # ------------------
+        # filter noise based on FFT alone
+        # XFr = np.array([np.real(fft(X[:,i])) for i in range(0,X.shape[1])]).T
+        # XFc = np.array([np.imag(fft(X[:,i])) for i in range(0,X.shape[1])]).T
+        # XF = XFr + 1j*XFc
+        # f = fftfreq(X.shape[0],self.si)
+        # print(XF.shape,f.shape)
+        # def clipXF(XF,f,f1,f2):
+        #     XF[(f>f2) & (f>=0)] = 0
+        #     XF[(f<-f2) & (f<=0)] = 0
+        #     XF[(f<f1) & (f>=0)] = 0
+        #     XF[(f>-f1) & (f<=0)] = 0
+        #     return(XF)
+        # XF1 = clipXF(XF,f,2,500)
+        # X1_ = np.array([np.real(ifft(XF1[:,i])) for i in range(0,XF1.shape[1])]).T
+        # XF2 = clipXF(XF,f,1,6)
+        # X2_ = np.array([np.real(ifft(XF2[:,i])) for i in range(0,XF2.shape[1])]).T
+        # # print(XFr.shape)
+        # # print(f,XFr)
+        # fh = plt.figure()
+        # ah = fh.add_subplot(111)
+        # # ah.plot(f,np.abs(XF[:,0]))
+        # ah.plot(t,(X-X[0,:]).mean(axis=1))
+        # ah.plot(t,np.real(X1_.mean(axis=-1)))
+        # ah.plot(t,np.real(X2_.mean(axis=-1)))
+        # plt.show()
+        # input()
+        # -----------------------
+        # filter noise based on FFT and ICA
+        XFr = np.array([np.real(fft(X[:,i])) for i in range(0,X.shape[1])]).T
+        XFi = np.array([np.imag(fft(X[:,i])) for i in range(0,X.shape[1])]).T
+        XF = XFr + 1j*XFi
+        ica = FastICA(n_components=4)
+        # ica.fit(XFr)
+        Sr = ica.fit_transform(XFr)
+        Si = ica.fit_transform(XFi)
+        Sr[:,3:] = 0
+        Si[:,3:] = 0
+        XFr_  = ica.inverse_transform(Sr)
+        XFi_  = ica.inverse_transform(Si)
+        XF_ = XFr_ + 1j*XFi_
+        X_ = np.array([np.real(ifft(XF_[:,i])) for i in range(0,XF_.shape[1])]).T
+        fh = plt.figure()
+        ah = fh.add_subplot(111)
+        ah.plot(t,X[:,0]-X[0,0])
+        ah.plot(t,X_[:,0])
+        plt.show()
+        input()
+        # ------------------------
+        # fh = plt.figure()
+        # ah = fh.add_subplot(111)
+        # ph = ah.pcolormesh(np.arange(0,5),f[(f>=0) & (f<=f2)],np.abs(XF)[(f>=0) & (f<f2),:]/np.max(np.abs(XF)[(f>=0) & (f<f2),:]),vmin=0,vmax=1,cmap='hot')
+        # fh.colorbar(ph)
+        # plt.show()
+        # input()
+        # -----------------------
+        # Ur, Sr, Vr = np.linalg.svd(np.real(XF),full_matrices=False)
+        # Uc, Sc, Vc = np.linalg.svd(np.imag(XF),full_matrices=False)
+        # print(Ur.shape,Sr.shape,Vr.shape)
+        # input()
+        # # XF_ = np.dot(Ur[:,0:1] * Sr[0:1], Vr[0:1]) +1j*(np.dot(Uc[:,0:1] * Sc[0:1], Vc[0:1]))
+        # # XF_ = np.dot(Ur[:,1:] * Sr[1:], Vr[1:]) +1j*(np.dot(Uc[:,1:] * Sc[1:], Vc[1:]))
+        # XF_ = np.dot(Ur[:,[1]] * Sr[1], Vr[[1]]) +1j*(np.dot(Uc[:,[1]] * Sc[1], Vc[[1]]))
+        # print(XF_.shape)
+        # X2_ = np.array([np.real(ifft(XF_[:,i])) for i in range(0,XF_.shape[1])]).T
+        # fh = plt.figure()
+        # ah = fh.add_subplot(111)
+        # # ah.plot(f,np.abs(XF[:,0]))
+        # ah.plot(t,(X-X[0,:]).mean(axis=1))
+        # ah.plot(t,np.real(X1_.mean(axis=-1)))
+        # ah.plot(t,np.real(X2_.mean(axis=-1)))
+        # # ah.plot(t,np.real(X1_.mean(axis=-1))-np.real(X2_.mean(axis=-1)))
+        # plt.show()
+        # input()

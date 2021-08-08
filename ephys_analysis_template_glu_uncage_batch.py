@@ -8,7 +8,7 @@ import datetime
 from matplotlib import pyplot as plt
 
 # read masterfile in Microsoft_excel
-masterfile_path = '/Users/macbookair/goofy/data/beiquelab/glu_uncage_ca1/'
+masterfile_path = '/home/anup/goofy/data/beiquelab/glu_uncage_spine_single_epsp_hc_ca1/'
 # datapath = '/Volumes/Anup_2TB/raw_data/beiquelab/o2p/'
 datapath = '/Users/macbookair/goofy/data/beiquelab/rawdata/'
 templatefilepath = '/Users/macbookair/goofy/data/beiquelab/glu_uncage_ca1/glu_uncage_avg_response.csv'
